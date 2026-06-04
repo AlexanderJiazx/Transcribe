@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+
+# Xcode / build artifacts
+.xcdd/
+build/
+DerivedData/
+*.xcuserstate
+
+# Xcode per-user data
+**/xcuserdata/
+**/*.xcuserdatad/
+
+# Large model weights (downloaded separately)
+models/
+
+# Swift Package Manager
+.build/
+.swiftpm/
