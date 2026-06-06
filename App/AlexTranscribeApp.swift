@@ -11,13 +11,16 @@ enum AlexTranscribeMain {
         let fullFrame = screen.frame
         let width = fullFrame.width
         let height = fullFrame.height
-        
         print("Width: \(width)\nHeight: \(height)")
+        
+        
+        
+        
         
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.regular)   // show in Dock, allow activation
+        app.setActivationPolicy(.accessory)   // show in Dock, allow activation
         app.run()
     }
 }

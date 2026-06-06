@@ -8,6 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		119732692FD1EEF600F57121 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 119732682FD1EEF500F57121 /* AppDelegate.swift */; };
+		1197326C2FD248F800F57121 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1197326A2FD248F800F57121 /* Assets.xcassets */; };
+		1197326D2FD248F800F57121 /* RecordAnimation.sks in Resources */ = {isa = PBXBuildFile; fileRef = 1197326B2FD248F800F57121 /* RecordAnimation.sks */; };
+		11FDBD0F2FD4785800E8C9DD /* SkyLight.swift in Sources */ = {isa = PBXBuildFile; fileRef = 11FDBD0E2FD4785800E8C9DD /* SkyLight.swift */; };
 		1A0000000000000000000021 /* Qwen3-ASR-1.7B-8bit in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000020 /* Qwen3-ASR-1.7B-8bit */; };
 		1A0000000000000000000022 /* VoiceRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000009 /* VoiceRecorder.swift */; };
 		1A00000000000000000000D1 /* AlexTranscribeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000007 /* AlexTranscribeApp.swift */; };
@@ -17,6 +20,9 @@
 
 /* Begin PBXFileReference section */
 		119732682FD1EEF500F57121 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
+		1197326A2FD248F800F57121 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		1197326B2FD248F800F57121 /* RecordAnimation.sks */ = {isa = PBXFileReference; lastKnownFileType = file.sks; path = RecordAnimation.sks; sourceTree = "<group>"; };
+		11FDBD0E2FD4785800E8C9DD /* SkyLight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyLight.swift; sourceTree = "<group>"; };
 		1A0000000000000000000006 /* AlexTranscribeApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AlexTranscribeApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000000000000000000007 /* AlexTranscribeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlexTranscribeApp.swift; sourceTree = "<group>"; };
 		1A0000000000000000000008 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
@@ -58,7 +64,10 @@
 			isa = PBXGroup;
 			children = (
 				1A0000000000000000000007 /* AlexTranscribeApp.swift */,
+				1197326A2FD248F800F57121 /* Assets.xcassets */,
+				1197326B2FD248F800F57121 /* RecordAnimation.sks */,
 				119732682FD1EEF500F57121 /* AppDelegate.swift */,
+				11FDBD0E2FD4785800E8C9DD /* SkyLight.swift */,
 				1A0000000000000000000008 /* ContentView.swift */,
 				1A0000000000000000000009 /* VoiceRecorder.swift */,
 				1A0000000000000000000023 /* AlexTranscribeApp.entitlements */,
@@ -131,6 +140,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				1A0000000000000000000021 /* Qwen3-ASR-1.7B-8bit in Resources */,
+				1197326C2FD248F800F57121 /* Assets.xcassets in Resources */,
+				1197326D2FD248F800F57121 /* RecordAnimation.sks in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -142,6 +153,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				119732692FD1EEF600F57121 /* AppDelegate.swift in Sources */,
+				11FDBD0F2FD4785800E8C9DD /* SkyLight.swift in Sources */,
 				1A00000000000000000000D1 /* AlexTranscribeApp.swift in Sources */,
 				1A00000000000000000000E1 /* ContentView.swift in Sources */,
 				1A0000000000000000000022 /* VoiceRecorder.swift in Sources */,

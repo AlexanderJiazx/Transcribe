@@ -7,98 +7,56 @@
 
 import AppKit
 
-// MARK: - Private SkyLight (SLS) space delegation
-//
-// A window only slides during a Space switch because it belongs to a *user*
-// Space that the WindowServer animates. The fix is to take it out of every user
-// Space: we create one dedicated SkyLight space at a high absolute level, keep it
-// permanently shown, and move the window into it. User Spaces then slide
-// underneath while this window stays fixed — the same mechanism the lock screen
-// and Notification Center use.
-//
-// (Window tags like the old "sticky" 0x800 bit only mean "appears on all Spaces"
-// — identical to .canJoinAllSpaces — and do nothing to stop the slide.)
-//
-// SkyLight is the modern successor to CoreGraphics Services. These are private
-// SPIs: no sandbox entitlement is required, but they are not guaranteed stable
-// across major macOS releases.
-private enum SLS {
-    typealias MainConnectionID = @convention(c) () -> Int32
-    typealias SpaceCreate = @convention(c) (Int32, Int32, Int32) -> Int32
-    typealias SpaceSetAbsoluteLevel = @convention(c) (Int32, Int32, Int32) -> Int32
-    typealias ShowSpaces = @convention(c) (Int32, CFArray) -> Int32
-    typealias AddWindowsAndRemoveFromSpaces = @convention(c) (Int32, Int32, CFArray, Int32) -> Int32
 
-    static let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight", RTLD_NOW)
-    static func sym<T>(_ name: String, _ type: T.Type) -> T {
-        unsafeBitCast(dlsym(handle, name), to: type)
-    }
 
-    static let mainConnectionID = sym("SLSMainConnectionID", MainConnectionID.self)
-    static let spaceCreate = sym("SLSSpaceCreate", SpaceCreate.self)
-    static let spaceSetAbsoluteLevel = sym("SLSSpaceSetAbsoluteLevel", SpaceSetAbsoluteLevel.self)
-    static let showSpaces = sym("SLSShowSpaces", ShowSpaces.self)
-    static let addWindowsAndRemoveFromSpaces = sym("SLSSpaceAddWindowsAndRemoveFromSpaces", AddWindowsAndRemoveFromSpaces.self)
+enum WindowState {
+    case expanded
+    case hidden
 }
 
-/// A dedicated, always-shown SkyLight space that floats above the user's Spaces.
-/// Windows moved into it stay fixed on screen during Space-switch animations.
-final class FixedOverlaySpace {
-    static let shared = FixedOverlaySpace()
-
-    // Absolute level of the overlay space (higher = covers more system UI):
-    //   0 default · 100 setup assistant · 200 security agent · 300 screen lock
-    //   400 notif-center-on-lock · 500 boot progress · 600 VoiceOver
-    // 300 floats above user Spaces and the menu bar. Lower it to keep the overlay
-    // off the lock screen; raise to 400 to show it even when the screen is locked.
-    private static let level: Int32 = 300
-
-    private let connection: Int32
-    private let space: Int32
-
-    private init() {
-        connection = SLS.mainConnectionID()
-        space = SLS.spaceCreate(connection, 1, 0)
-        _ = SLS.spaceSetAbsoluteLevel(connection, space, Self.level)
-        _ = SLS.showSpaces(connection, [space] as CFArray)
-    }
-
-    /// Moves `window` into the fixed overlay space. Must be called after the
-    /// window is on screen (windowNumber > 0). The trailing `7` is the
-    /// all-Spaces selector: remove the window from the user Spaces it was in.
-    func adopt(_ window: NSWindow) {
-        guard window.windowNumber > 0 else { return }
-        _ = SLS.addWindowsAndRemoveFromSpaces(connection, space, [window.windowNumber] as CFArray, 7)
-    }
+struct ScreenInfo{
+    var width: CGFloat
+    var height: CGFloat
+    var fringeWidth: CGFloat
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        
+    var windowState: WindowState = .hidden
+    
+    //screen info
+    var screenInfo: ScreenInfo = ScreenInfo(width: 0,
+                                           height: 0,
+                                           fringeWidth: 0)
+    
+    private func initScreeninfo(){
         let screen = NSScreen.main!
         let fullFrame = screen.frame
-        let width = fullFrame.width
-        let height = fullFrame.height
         
-        let RectangleWidth: CGFloat = 184
-        let windowHeight:CGFloat = RectangleWidth
+        screenInfo = ScreenInfo(width: fullFrame.width,
+                                height: fullFrame.height,
+                                fringeWidth: 184)
+    }
+    
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        
+        initScreeninfo()
         
         //32 is the height of the fringe
         window = NSPanel(
-            contentRect: NSRect(x: (width-RectangleWidth)/2, y: height-windowHeight, width: RectangleWidth, height: windowHeight),
+            contentRect: NSRect(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height, width: screenInfo.fringeWidth, height: screenInfo.fringeWidth),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
+        windowState = .hidden
 
         window.isOpaque = false
         window.backgroundColor = .clear
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         window.level = .screenSaver
-        window.hasShadow = true
+        window.hasShadow = false
 
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.animationBehavior = .none
@@ -110,6 +68,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         FixedOverlaySpace.shared.adopt(window)
         window.orderFrontRegardless()
 
+        keyPressInterception()
+        /*
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+              guard let self else { return }
+              self.moveWindow(to: NSPoint(x: (width-RectangleWidth)/2, y: height-windowHeight))
+          }
+         */
+
         let contentView = window.contentView!
         contentView.wantsLayer = true
         contentView.layer?.backgroundColor = NSColor.black.cgColor
@@ -118,7 +84,88 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         contentView.layer?.masksToBounds = true
 
     }
+
+    private func switchWindowState(){
+        switch windowState {
+            case .hidden:
+            moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height - screenInfo.fringeWidth))
+            windowState = .expanded
+                return
+            case .expanded:
+            moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height))
+            windowState = .hidden
+                return
+            }
+    }
+    
+    private func switchWindowState(to target: WindowState){
+        switch target {
+            case .hidden:
+                moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height))
+                windowState = .hidden
+            case .expanded:
+                moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height - screenInfo.fringeWidth))
+                windowState = .expanded
+            }
+    }
+    //Written by Claude, I don't know how it works
+    private func keyPressInterception() {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(opts)
+        print("[tap] Accessibility trusted: \(trusted)")
+        guard trusted else {
+            print("[tap] Grant Accessibility permission then restart the app")
+            return
+        }
+
+        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
+
+        // Mask covers keyDown + systemDefined (media keys sent by F-keys on MacBooks)
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) |
+                   CGEventMask(1 << 14) // 14 = systemDefined (media/function keys)
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: { _, type, event, refcon in
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                print("[tap] event type: \(type.rawValue)  keyCode: \(keyCode)")
+                guard keyCode == 176 else {
+                    return Unmanaged.passRetained(event)
+                }
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
+                DispatchQueue.main.async {
+                    delegate.switchWindowState()
+                }
+                return nil
+            },
+            userInfo: selfPtr
+        ) else {
+            print("[tap] CGEvent.tapCreate failed")
+            return
+        }
+
+        print("[tap] tap created successfully")
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+    
+    
+    
+    private func moveWindow(to origin: NSPoint) {
+          let newFrame = NSRect(origin: origin, size: window.frame.size)
+          NSAnimationContext.runAnimationGroup { context in
+              context.duration = 0.4
+              context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+              window.animator().setFrame(newFrame, display: true)
+          }
+      }
+    
 }
+
 
 /*
 class UnconstrainedPanel: NSPanel {
