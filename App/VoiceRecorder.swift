@@ -29,6 +29,9 @@ final class VoiceRecorder {
 
     /// Begin capturing. Discards any previously captured audio.
     func start() throws {
+        //Request permission using AVAudioSession
+        
+        
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
 
         let input = engine.inputNode

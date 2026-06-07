@@ -6,6 +6,8 @@
 //
 
 import AppKit
+import AlexTranscribeKit
+import AVFAudio
 
 
 
@@ -29,6 +31,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                            height: 0,
                                            fringeWidth: 0)
     
+    var audioData: Data?
+    private let recorder = VoiceRecorder()
+    
+    private var transcriber: AlexTranscriber?
+    
+    private let transcribeQueue = DispatchQueue(label: "transcribe", qos: .userInitiated)  // ← add
+    
     private func initScreeninfo(){
         let screen = NSScreen.main!
         let fullFrame = screen.frame
@@ -39,6 +48,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationDidFinishLaunching(_ notification: Notification) {
+        Task{
+            await AVAudioApplication.requestRecordPermission()
+            print("Asked audio permission")
+        }
         
         initScreeninfo()
         
@@ -85,6 +98,102 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     }
 
+    private func startRecord(){
+        //Start recording
+        guard !recorder.isRecording else { return }
+
+        // requestPermission() prompts only when status is .notDetermined; it returns
+        // false outright if access was previously denied or restricted.
+        Task { @MainActor in
+            guard await recorder.requestPermission() else {
+                print("[record] microphone access denied — enable it in System Settings")
+                return
+            }
+            do {
+                audioData = nil                 // discard any previous capture
+                try recorder.start()
+                print("[record] recording started")
+            } catch {
+                print("[record] couldn't start: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func makeWAV(_ samples: [Float], sampleRate: Double) -> Data {
+        // Encode the captured mono float samples as a 16-bit PCM WAV in memory.
+        // AlexTranscriber.transcribe(audioData:) parses WAV directly and resamples to 16 kHz.
+        let numChannels: UInt16 = 1
+        let bitsPerSample: UInt16 = 16
+        let rate = UInt32(sampleRate)
+        let blockAlign = numChannels * (bitsPerSample / 8)
+        let byteRate = rate * UInt32(blockAlign)
+        let dataSize = UInt32(samples.count) * UInt32(blockAlign)
+
+        var d = Data()
+        d.reserveCapacity(44 + Int(dataSize))
+        func append32(_ v: UInt32) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 4)) }
+        func append16(_ v: UInt16) { var x = v.littleEndian; d.append(Data(bytes: &x, count: 2)) }
+        func appendStr(_ s: String) { d.append(contentsOf: s.utf8) }
+
+        appendStr("RIFF"); append32(36 + dataSize); appendStr("WAVE")
+        appendStr("fmt "); append32(16); append16(1)        // Subchunk1Size, PCM
+        append16(numChannels); append32(rate); append32(byteRate)
+        append16(blockAlign); append16(bitsPerSample)
+        appendStr("data"); append32(dataSize)
+
+        for s in samples {
+            let clamped = Swift.max(-1, Swift.min(1, s))
+            var i = Int16(clamped * 32767).littleEndian
+            d.append(Data(bytes: &i, count: 2))
+        }
+        return d
+    }
+    
+    private func endRecord(){
+        //End recording, save the recording to audioData
+        guard recorder.isRecording else { return }
+        let (samples, sampleRate) = recorder.stop()
+
+        audioData = makeWAV(samples, sampleRate: sampleRate)
+        print("[record] captured \(String(format: "%.1f", Double(samples.count) / sampleRate))s")
+    }
+
+    private func transcribe(){
+        //Transcribe audioData and save the result to user clipboard
+        guard let audioData else {
+            print("[transcribe] no audio to transcribe")
+            return
+        }
+        transcribeQueue.async { [weak self] in
+            guard let self else { return }
+            do {
+                if self.transcriber == nil {
+                    self.transcriber = try AlexTranscriber()   // bundled model, loaded once
+                }
+                let text = try self.transcriber!.transcribe(audioData: audioData)
+                DispatchQueue.main.async {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(text, forType: .string)
+                    print("[transcribe] copied \(text.count) chars to clipboard")
+
+                    // Paste into the frontmost app by synthesizing ⌘V. The non-activating
+                    // panel keeps focus on the previous app, so the paste lands there.
+                    let src = CGEventSource(stateID: .combinedSessionState)
+                    let vKey: CGKeyCode = 9   // kVK_ANSI_V
+                    let down = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: true)
+                    let up = CGEvent(keyboardEventSource: src, virtualKey: vKey, keyDown: false)
+                    down?.flags = .maskCommand
+                    up?.flags = .maskCommand
+                    down?.post(tap: .cghidEventTap)
+                    up?.post(tap: .cghidEventTap)
+                }
+            } catch {
+                print("[transcribe] error: \(error.localizedDescription)")
+            }
+        }
+    }
+    
     private func switchWindowState(){
         switch windowState {
             case .hidden:
@@ -137,7 +246,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
                 DispatchQueue.main.async {
-                    delegate.switchWindowState()
+                    delegate.Action()
                 }
                 return nil
             },
@@ -153,7 +262,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         CGEvent.tapEnable(tap: tap, enable: true)
     }
     
-    
+    private func Action(){
+        switch windowState {
+        case .expanded:
+            endRecord()
+            transcribe()
+            switchWindowState(to: .hidden)
+        case .hidden:
+            startRecord()
+            switchWindowState(to: .expanded)
+        }
+    }
     
     private func moveWindow(to origin: NSPoint) {
           let newFrame = NSRect(origin: origin, size: window.frame.size)

@@ -13,10 +13,6 @@ enum AlexTranscribeMain {
         let height = fullFrame.height
         print("Width: \(width)\nHeight: \(height)")
         
-        
-        
-        
-        
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
