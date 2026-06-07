@@ -8,6 +8,7 @@
 import AppKit
 import AlexTranscribeKit
 import AVFAudio
+import SpriteKit
 
 
 
@@ -37,7 +38,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcriber: AlexTranscriber?
     
     private let transcribeQueue = DispatchQueue(label: "transcribe", qos: .userInitiated)  // ← add
-    
+
+    // Particle overlay shown inside the window during record + transcribe.
+    private var skView: SKView?
+    private var recordEmitter: SKEmitterNode?
+    private var isTranscribing = false
+
     private func initScreeninfo(){
         let screen = NSScreen.main!
         let fullFrame = screen.frame
@@ -95,7 +101,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         contentView.layer?.cornerRadius = 10
         contentView.layer?.cornerCurve = .continuous
         contentView.layer?.masksToBounds = true
-
     }
 
     private func startRecord(){
@@ -154,6 +159,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard recorder.isRecording else { return }
         let (samples, sampleRate) = recorder.stop()
 
+        // The mel front-end reflect-pads by 200 samples, so inputs shorter than that crash
+        // with "Index out of range". Skip accidental ultra-short taps (also pointless to
+        // transcribe). Leaving audioData == nil makes transcribe()'s guard reset the UI.
+        let minDuration = 0.2  // seconds
+        guard Double(samples.count) >= minDuration * sampleRate else {
+            print("[record] too short (\(samples.count) samples) — skipping transcription")
+            return
+        }
+
         audioData = makeWAV(samples, sampleRate: sampleRate)
         print("[record] captured \(String(format: "%.1f", Double(samples.count) / sampleRate))s")
     }
@@ -162,6 +176,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         //Transcribe audioData and save the result to user clipboard
         guard let audioData else {
             print("[transcribe] no audio to transcribe")
+            finishTranscription()       // don't leave the window stuck expanded
             return
         }
         transcribeQueue.async { [weak self] in
@@ -187,9 +202,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     up?.flags = .maskCommand
                     down?.post(tap: .cghidEventTap)
                     up?.post(tap: .cghidEventTap)
+
+                    self.finishTranscription()      // stop particles + slide window up
                 }
             } catch {
                 print("[transcribe] error: \(error.localizedDescription)")
+                DispatchQueue.main.async { self.finishTranscription() }
             }
         }
     }
@@ -207,15 +225,105 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
     }
     
-    private func switchWindowState(to target: WindowState){
+    private func switchWindowState(to target: WindowState, completion: (() -> Void)? = nil){
         switch target {
             case .hidden:
-                moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height))
+                moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height),
+                           completion: completion)
                 windowState = .hidden
             case .expanded:
-                moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height - screenInfo.fringeWidth))
+                moveWindow(to: NSPoint(x: (screenInfo.width - screenInfo.fringeWidth)/2, y: screenInfo.height - screenInfo.fringeWidth),
+                           completion: completion)
                 windowState = .expanded
             }
+    }
+
+    // MARK: - Particle overlay
+
+    // Build a fresh particle view: a SpriteKit view inset 32 pt from the window edges
+    // (the required padding) with a feathered circular mask so particles fade softly to
+    // transparent toward a circle, with no hard edge. Created per-session and torn down
+    // completely when the session ends, so nothing can carry over.
+    private func makeParticleView() -> SKView? {
+        guard let contentView = window.contentView else { return nil }
+        let inset: CGFloat = 32
+        let skView = SKView(frame: contentView.bounds.insetBy(dx: inset, dy: inset))
+        skView.allowsTransparency = true            // let the black background show through
+        skView.autoresizingMask = []                // window is fixed-size
+        skView.wantsLayer = true
+        let scene = SKScene(size: skView.bounds.size)
+        scene.backgroundColor = .clear
+        scene.scaleMode = .resizeFill
+        skView.presentScene(scene)
+
+        let mask = CAGradientLayer()
+        mask.type = .radial
+        mask.colors = [NSColor.white.cgColor, NSColor.white.cgColor, NSColor.clear.cgColor]
+        mask.locations = [0.0, 0.55, 1.0]
+        mask.startPoint = CGPoint(x: 0.5, y: 0.5)
+        mask.endPoint = CGPoint(x: 1.0, y: 1.0)     // radius reaches the edge midpoints
+        mask.frame = skView.bounds
+        skView.layer?.mask = mask
+        return skView
+    }
+
+    // Load the emitter from the .sks. `white` forces solid-white particles (overriding
+    // the authored colour sequences) for the transcription phase; otherwise it's used
+    // exactly as authored.
+    private func makeEmitter(white: Bool) -> SKEmitterNode? {
+        guard let scene = skView?.scene,
+              let emitter = SKEmitterNode(fileNamed: "RecordAnimation") else { return nil }
+        emitter.position = CGPoint(x: scene.size.width / 2, y: scene.size.height / 2)
+        if white {
+            emitter.particleColorSequence = nil
+            emitter.particleColorBlendFactorSequence = nil
+            emitter.particleColor = .white
+            emitter.particleColorBlendFactor = 1
+        }
+        return emitter
+    }
+
+    // Remove the entire particle layer from the window.
+    private func removeParticleLayer() {
+        skView?.removeFromSuperview()
+        skView = nil
+        recordEmitter = nil
+    }
+
+    // Recording: build a fresh particle view with the authored emitter, untouched.
+    private func startRecordingParticles() {
+        guard let contentView = window.contentView else { return }
+        removeParticleLayer()                               // clean slate
+        guard let skView = makeParticleView() else { return }
+        contentView.addSubview(skView)
+        self.skView = skView
+        guard let emitter = makeEmitter(white: false) else {
+            print("[particles] couldn't load RecordAnimation.sks"); return
+        }
+        skView.scene?.addChild(emitter)
+        recordEmitter = emitter
+    }
+
+    // Transcription: crossfade the authored stream into a white one via node alpha, so
+    // the authored colours are never mutated (no colour pop) and existing particles fade
+    // out cleanly.
+    private func transitionParticlesToWhite(duration: TimeInterval = 0.4) {
+        guard let scene = skView?.scene, let outgoing = recordEmitter,
+              let white = makeEmitter(white: true) else { return }
+        white.alpha = 0
+        scene.addChild(white)
+        white.run(.fadeIn(withDuration: duration))
+        outgoing.run(.sequence([.fadeOut(withDuration: duration), .removeFromParent()]))
+        recordEmitter = white
+    }
+
+    // Called on the main thread once transcription finishes (paste) or errors.
+    private func finishTranscription() {
+        isTranscribing = false
+        recordEmitter?.particleBirthRate = 0                // stop emitting new particles
+        switchWindowState(to: .hidden) { [weak self] in
+            self?.removeParticleLayer()                     // completely remove the particle layer
+        }
     }
     //Written by Claude, I don't know how it works
     private func keyPressInterception() {
@@ -265,22 +373,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func Action(){
         switch windowState {
         case .expanded:
+            guard !isTranscribing else { return }       // ignore key presses while transcribing
             endRecord()
-            transcribe()
-            switchWindowState(to: .hidden)
+            isTranscribing = true
+            transitionParticlesToWhite()                // green → white, window stays visible
+            transcribe()                                // hides window on completion
         case .hidden:
             startRecord()
-            switchWindowState(to: .expanded)
+            switchWindowState(to: .expanded) { [weak self] in
+                self?.startRecordingParticles()         // start AFTER the slide-down completes
+            }
         }
     }
-    
-    private func moveWindow(to origin: NSPoint) {
+
+    private func moveWindow(to origin: NSPoint, completion: (() -> Void)? = nil) {
           let newFrame = NSRect(origin: origin, size: window.frame.size)
-          NSAnimationContext.runAnimationGroup { context in
+          NSAnimationContext.runAnimationGroup({ context in
               context.duration = 0.4
               context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
               window.animator().setFrame(newFrame, display: true)
-          }
+          }, completionHandler: completion)
       }
     
 }
