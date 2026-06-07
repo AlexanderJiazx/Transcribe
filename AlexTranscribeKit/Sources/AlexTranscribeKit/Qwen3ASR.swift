@@ -31,12 +31,12 @@ final class Qwen3ASRModel: Module {
         eval(self)
     }
 
-    func audioFeatures(_ inputFeatures: MLXArray) -> MLXArray {
-        audioTower(inputFeatures)
+    func audioFeatures(_ inputFeatures: MLXArray) throws -> MLXArray {
+        try audioTower(inputFeatures)
     }
 
     /// Build input embeddings, splicing audio features in place of audio-pad tokens.
-    func inputsEmbeds(ids: [Int], audioFeatures: MLXArray) -> MLXArray {
+    func inputsEmbeds(ids: [Int], audioFeatures: MLXArray) throws -> MLXArray {
         let idsArray = MLXArray(ids.map { Int32($0) })
         var embeds = model.embedTokens(idsArray)              // (L, hidden)
         let af = audioFeatures.asType(embeds.dtype)
@@ -45,6 +45,14 @@ final class Qwen3ASRModel: Module {
             return embeds.reshaped([1, ids.count, embeds.dim(1)])
         }
         let num = af.dim(0)
+        // The number of audio embeddings must match the audio-pad tokens reserved in the
+        // prompt; otherwise the splice would drop real tokens or form an invalid slice range
+        // (`(start + num) ..< ids.count`), trapping. Throw so the caller can recover instead.
+        let padCount = ids.lazy.filter { $0 == self.cfg.audioTokenId }.count
+        guard num == padCount, start + num <= ids.count else {
+            throw AudioError.featureLengthMismatch(
+                "audio produced \(num) frames but prompt reserved \(padCount) audio-pad tokens")
+        }
         let pre = embeds[0 ..< start, 0...]
         let post = embeds[(start + num) ..< ids.count, 0...]
         embeds = concatenated([pre, af, post], axis: 0)       // (L, hidden)
@@ -92,25 +100,25 @@ struct Transcriber {
     /// Transcribe from disk
     func transcribe(audioURL: URL, maxTokens: Int = 4096, verbose: Bool = true) throws -> String {
         let audio = try loadAudio16kMono(url: audioURL)
-        return transcribe(samples16k: audio, maxTokens: maxTokens, verbose: verbose)
+        return try transcribe(samples16k: audio, maxTokens: maxTokens, verbose: verbose)
     }
 
     /// Transcribe in-memory
-    func transcribe(samples16k audio: [Float], maxTokens: Int = 4096, verbose: Bool = true) -> String {
+    func transcribe(samples16k audio: [Float], maxTokens: Int = 4096, verbose: Bool = true) throws -> String {
         let t0 = Date()
         if verbose { print("audio: \(audio.count) samples (\(String(format: "%.2f", Double(audio.count) / 16000))s)") }
 
-        let (feats, numFrames) = mel.features(from: audio)
+        let (feats, numFrames) = try mel.features(from: audio)
         let numAudioTokens = featExtractOutputLength(numFrames)
         if verbose { print("mel frames: \(numFrames), audio tokens: \(numAudioTokens)") }
 
         // encode audio
-        let audioEmb = model.audioFeatures(feats)
+        let audioEmb = try model.audioFeatures(feats)
         audioEmb.eval()
         if verbose { print("audio encoded: \(audioEmb.shape)") }
 
         let promptIds = buildPrompt(numAudioTokens: numAudioTokens)
-        let embeds = model.inputsEmbeds(ids: promptIds, audioFeatures: audioEmb)
+        let embeds = try model.inputsEmbeds(ids: promptIds, audioFeatures: audioEmb)
         embeds.eval()
         if verbose { print("prompt tokens: \(promptIds.count)") }
 

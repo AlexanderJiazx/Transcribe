@@ -56,7 +56,7 @@ public final class AlexTranscriber {
     /// file because AVFoundation's decoders require one.
     public func transcribe(audioData: Data, maxTokens: Int = 4096, verbose: Bool = false) throws -> String {
         let samples = try loadAudio16kMono(data: audioData)
-        return transcriber.transcribe(samples16k: samples, maxTokens: maxTokens, verbose: verbose)
+        return try transcriber.transcribe(samples16k: samples, maxTokens: maxTokens, verbose: verbose)
     }
 
     /// Transcribe raw mono PCM samples held in memory. Resampled to 16 kHz if needed.
@@ -68,7 +68,7 @@ public final class AlexTranscriber {
         verbose: Bool = false
     ) throws -> String {
         let s = samples16kMono(samples, sampleRate: sampleRate)
-        return transcriber.transcribe(samples16k: s, maxTokens: maxTokens, verbose: verbose)
+        return try transcriber.transcribe(samples16k: s, maxTokens: maxTokens, verbose: verbose)
     }
 }
 

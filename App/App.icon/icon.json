@@ -1,0 +1,45 @@
+{
+  "fill" : {
+    "linear-gradient" : [
+      "display-p3:0.22851,0.28627,0.28627,1.00000",
+      "srgb:0.00000,0.53333,0.65419,1.00000"
+    ],
+    "orientation" : {
+      "start" : {
+        "x" : 0.5,
+        "y" : 0
+      },
+      "stop" : {
+        "x" : 0.5,
+        "y" : 0.7
+      }
+    }
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "fill" : {
+            "solid" : "srgb:1.00000,1.00000,1.00000,1.00000"
+          },
+          "image-name" : "microphone.png",
+          "name" : "microphone"
+        }
+      ],
+      "shadow" : {
+        "kind" : "neutral",
+        "opacity" : 0.5
+      },
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.5
+      }
+    }
+  ],
+  "supported-platforms" : {
+    "circles" : [
+      "watchOS"
+    ],
+    "squares" : "shared"
+  }
+}

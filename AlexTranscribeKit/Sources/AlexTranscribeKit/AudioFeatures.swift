@@ -3,7 +3,23 @@ import AVFoundation
 import MLX
 import MLXFFT
 
-enum AudioError: Error { case decodeFailed(String) }
+enum AudioError: Error, CustomStringConvertible {
+    case decodeFailed(String)
+    /// Audio is too short for the mel front-end (needs at least `nFFT/2 + 1` samples at 16 kHz).
+    case audioTooShort(sampleCount: Int, minimum: Int)
+    /// The audio encoder produced a frame count that disagrees with the predicted length.
+    /// Thrown instead of trapping on an out-of-bounds index, so the caller can recover.
+    case featureLengthMismatch(String)
+
+    var description: String {
+        switch self {
+        case .decodeFailed(let m): return "Audio decode failed: \(m)"
+        case .audioTooShort(let n, let min):
+            return "Audio too short to transcribe: \(n) samples (need at least \(min))"
+        case .featureLengthMismatch(let m): return "Audio feature length mismatch: \(m)"
+        }
+    }
+}
 
 /// Load audio as 16 kHz mono Float samples.
 ///
@@ -251,8 +267,16 @@ struct WhisperMel {
     }
 
     /// Compute log-mel features. Returns (features (128, T), numFrames T).
-    func features(from audio: [Float]) -> (MLXArray, Int) {
+    ///
+    /// Throws `AudioError.audioTooShort` when `audio` has fewer than `nFFT/2 + 1` samples
+    /// (201 at 16 kHz / ≈ 12.5 ms). This replaces what would otherwise be a fatal
+    /// "Index out of range" crash in the reflect-pad, letting the caller recover.
+    func features(from audio: [Float]) throws -> (MLXArray, Int) {
         let pad = nFFT / 2  // 200, reflect
+        let minSamples = pad + 1  // reflect-pad below reads audio[pad], so count must be ≥ pad+1
+        guard audio.count >= minSamples else {
+            throw AudioError.audioTooShort(sampleCount: audio.count, minimum: minSamples)
+        }
 
         // reflect-pad in Swift (numpy 'reflect' semantics, no edge repeat)
         var padded = [Float]()

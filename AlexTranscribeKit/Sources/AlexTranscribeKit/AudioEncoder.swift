@@ -4,11 +4,21 @@ import MLXNN
 import MLXFast
 
 /// Conv output length of the audio frontend (matches Python _get_feat_extract_output_lengths).
+///
+/// The Python reference uses floor division (`-1 // 2 == -1`); Swift's `/` truncates toward
+/// zero (`-1 / 2 == 0`). When `inputLen` is a multiple of 100 the truncating version returns
+/// one too many, which made `featExtractOutputLength(100·k)` come out as `13·k + 1` instead of
+/// `13·k`. Downstream that desynced the block-attention mask from the encoder's actual frame
+/// count, indexing one row past the end of `maskFlat` and crashing with "Index out of range"
+/// whenever the mel-frame count landed on a multiple of 100. Use floor division to match Python.
 func featExtractOutputLength(_ inputLen: Int) -> Int {
+    func fdiv(_ a: Int, _ b: Int) -> Int {        // Python floor division (//)
+        let q = a / b, r = a % b
+        return (r != 0 && (r < 0) != (b < 0)) ? q - 1 : q
+    }
     let leave = inputLen % 100
-    let featLen = (leave - 1) / 2 + 1
-    let out = ((featLen - 1) / 2 + 1 - 1) / 2 + 1 + (inputLen / 100) * 13
-    return out
+    let featLen = fdiv(leave - 1, 2) + 1
+    return fdiv(fdiv(featLen - 1, 2) + 1 - 1, 2) + 1 + (inputLen / 100) * 13
 }
 
 private func sinusoidalPositionEmbedding(length: Int, channels: Int) -> MLXArray {
@@ -109,7 +119,7 @@ final class AudioEncoder: Module {
     }
 
     /// Encode a single audio's mel features (128, T) -> (numAudioTokens, output_dim).
-    func callAsFunction(_ inputFeatures: MLXArray) -> MLXArray {
+    func callAsFunction(_ inputFeatures: MLXArray) throws -> MLXArray {
         let featLen = inputFeatures.dim(1)  // T (single audio, fully valid)
         let chunkSize = cfg.nWindow * 2     // 100
 
@@ -158,10 +168,12 @@ final class AudioEncoder: Module {
         let posEmb = sinusoidalPositionEmbedding(length: x.dim(1), channels: cfg.d_model)
         x = x + posEmb.reshaped([1, x.dim(1), cfg.d_model])
 
-        // gather valid frames per chunk and concatenate over time
+        // gather valid frames per chunk and concatenate over time.
+        // Clamp to the conv output `t` so a stale length can never overrun the tensor (MLX
+        // would clamp silently anyway; being explicit keeps the frame count well-defined).
         var hiddenList = [MLXArray]()
         for j in 0..<numChunks {
-            hiddenList.append(x[j, 0 ..< chunkAfterCnn[j], 0...])
+            hiddenList.append(x[j, 0 ..< Swift.min(chunkAfterCnn[j], t), 0...])
         }
         var hidden = concatenated(hiddenList, axis: 0)  // (seq, dim)
         let seqLen = hidden.dim(0)
@@ -176,6 +188,14 @@ final class AudioEncoder: Module {
         var cuSeqlens = [Int]()
         var acc = 0
         for v in cuChunkLens { acc += v; cuSeqlens.append(acc) }
+
+        // The window bounds come from `aftercnnLen`; the mask is sized from the encoder's
+        // actual `seqLen`. These must agree — if they ever don't, throw instead of letting
+        // the fill loop below index past the end of `maskFlat` (a fatal Swift trap).
+        guard (cuSeqlens.last ?? 0) <= seqLen else {
+            throw AudioError.featureLengthMismatch(
+                "mask windows reach \(cuSeqlens.last ?? 0) but encoder produced \(seqLen) frames")
+        }
 
         // additive block mask (seqLen, seqLen)
         var maskFlat = [Float](repeating: -1e9, count: seqLen * seqLen)
