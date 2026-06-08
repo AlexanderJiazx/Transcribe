@@ -9,7 +9,7 @@ import AppKit
 import AlexTranscribeKit
 import AVFAudio
 import SpriteKit
-
+import MLX
 
 
 enum WindowState {
@@ -107,6 +107,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         //Start recording
         guard !recorder.isRecording else { return }
 
+        //Load the model
+        if transcriber == nil {
+                transcribeQueue.async { [weak self] in
+                    guard let self, self.transcriber == nil else { return }
+                    self.transcriber = try? AlexTranscriber()
+                }
+            }
+        
         // requestPermission() prompts only when status is .notDetermined; it returns
         // false outright if access was previously denied or restricted.
         Task { @MainActor in
@@ -122,6 +130,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 print("[record] couldn't start: \(error.localizedDescription)")
             }
         }
+        
     }
 
     private func makeWAV(_ samples: [Float], sampleRate: Double) -> Data {
@@ -185,7 +194,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.transcriber == nil {
                     self.transcriber = try AlexTranscriber()   // bundled model, loaded once
                 }
-                let text = try self.transcriber!.transcribe(audioData: audioData)
+                let raw_text = try self.transcriber!.transcribe(audioData: audioData)
+                // Drop the ending . and 。
+                let text = textPostProcessing(for: raw_text)
                 DispatchQueue.main.async {
                     let pb = NSPasteboard.general
                     pb.clearContents()
@@ -209,6 +220,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 print("[transcribe] error: \(error.localizedDescription)")
                 DispatchQueue.main.async { self.finishTranscription() }
             }
+        }
+    }
+    
+    private func textPostProcessing(for text:String) -> String{
+        if text.hasSuffix(".") || text.hasSuffix("。"){
+            return String(text.dropLast())
+        }else{
+            return text
         }
     }
     
@@ -324,6 +343,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         switchWindowState(to: .hidden) { [weak self] in
             self?.removeParticleLayer()                     // completely remove the particle layer
         }
+        
+        
+        //Remove the model from memory
+        print("Removing transcriber")
+        self.transcriber = nil
+        transcribeQueue.async { [weak self] in
+                self?.transcriber = nil
+                Memory.clearCache()        // flush Metal buffer pool
+            }
+       
     }
     //Written by Claude, I don't know how it works
     private func keyPressInterception() {
