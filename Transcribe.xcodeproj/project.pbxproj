@@ -28,7 +28,7 @@
 		1197326B2FD248F800F57121 /* RecordAnimation.sks */ = {isa = PBXFileReference; lastKnownFileType = file.sks; path = RecordAnimation.sks; sourceTree = "<group>"; };
 		11DFBD2E2FD600E300731720 /* App.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = App.icon; sourceTree = "<group>"; };
 		11FDBD0E2FD4785800E8C9DD /* SkyLight.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyLight.swift; sourceTree = "<group>"; };
-		1A0000000000000000000006 /* AlexTranscribeApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AlexTranscribeApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		1A0000000000000000000006 /* Transcribe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Transcribe.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1A0000000000000000000007 /* AlexTranscribeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AlexTranscribeApp.swift; sourceTree = "<group>"; };
 		1A0000000000000000000009 /* VoiceRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoiceRecorder.swift; sourceTree = "<group>"; };
 		1A0000000000000000000020 /* Qwen3-ASR-1.7B-8bit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "Qwen3-ASR-1.7B-8bit"; path = "models/Qwen3-ASR-1.7B-8bit"; sourceTree = "<group>"; };
@@ -59,7 +59,7 @@
 		1A0000000000000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				1A0000000000000000000006 /* AlexTranscribeApp.app */,
+				1A0000000000000000000006 /* Transcribe.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -84,9 +84,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		1A0000000000000000000005 /* AlexTranscribeApp */ = {
+		1A0000000000000000000005 /* Transcribe */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 1A0000000000000000000011 /* Build configuration list for PBXNativeTarget "AlexTranscribeApp" */;
+			buildConfigurationList = 1A0000000000000000000011 /* Build configuration list for PBXNativeTarget "Transcribe" */;
 			buildPhases = (
 				1A000000000000000000000A /* Sources */,
 				1A000000000000000000000B /* Frameworks */,
@@ -96,12 +96,12 @@
 			);
 			dependencies = (
 			);
-			name = AlexTranscribeApp;
+			name = Transcribe;
 			packageProductDependencies = (
 				1A0000000000000000000017 /* AlexTranscribeKit */,
 			);
 			productName = AlexTranscribeApp;
-			productReference = 1A0000000000000000000006 /* AlexTranscribeApp.app */;
+			productReference = 1A0000000000000000000006 /* Transcribe.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -119,7 +119,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 1A0000000000000000000010 /* Build configuration list for PBXProject "AlexTranscribeApp" */;
+			buildConfigurationList = 1A0000000000000000000010 /* Build configuration list for PBXProject "Transcribe" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -135,7 +135,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				1A0000000000000000000005 /* AlexTranscribeApp */,
+				1A0000000000000000000005 /* Transcribe */,
 			);
 		};
 /* End PBXProject section */
@@ -288,6 +288,7 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Transcribe;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AlexTranscribe records your voice so it can be transcribed on-device.";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -295,7 +296,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.alextranscribe.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.alexanderjia.app.transcribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -328,6 +329,7 @@
 				ENABLE_RESOURCE_ACCESS_LOCATION = NO;
 				ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY = NO;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Transcribe;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AlexTranscribe records your voice so it can be transcribed on-device.";
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -335,7 +337,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.alextranscribe.app;
+				PRODUCT_BUNDLE_IDENTIFIER = com.alexanderjia.app.transcribe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES = NO;
 				RUNTIME_EXCEPTION_ALLOW_JIT = NO;
@@ -351,7 +353,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		1A0000000000000000000010 /* Build configuration list for PBXProject "AlexTranscribeApp" */ = {
+		1A0000000000000000000010 /* Build configuration list for PBXProject "Transcribe" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				1A0000000000000000000012 /* Debug */,
@@ -360,7 +362,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		1A0000000000000000000011 /* Build configuration list for PBXNativeTarget "AlexTranscribeApp" */ = {
+		1A0000000000000000000011 /* Build configuration list for PBXNativeTarget "Transcribe" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				1A0000000000000000000014 /* Debug */,
