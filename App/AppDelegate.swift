@@ -23,6 +23,11 @@ struct ScreenInfo{
     var fringeWidth: CGFloat
 }
 
+// The tap watchdog's liveness probe: a flagsChanged event for an option-key
+// release. It is inert in every app (a release of a modifier that was never
+// pressed), so leaking it when the tap is dead is harmless.
+private let tapProbeKeyCode: Int64 = 58  // left option
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var windowState: WindowState = .hidden
@@ -81,6 +86,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordEmitter: SKEmitterNode?
     private var isTranscribing = false
     private var keyTap: CFMachPort?
+    private var keyTapSource: CFRunLoopSource?
+    private var tapWatchdog: Timer?
+    // Heartbeat sent through the tap to detect silent death (the port can be
+    // invalidated without ever delivering tapDisabledByTimeout — observed:
+    // the tap stopped delivering all events with no disable notification).
+    private var probePending = false
+    private var tapTestFired = false
 
     private func initScreeninfo(){
         let screen = NSScreen.main!
@@ -625,8 +637,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         let selfPtr = Unmanaged.passUnretained(self).toOpaque()
 
-        // Mask covers keyDown + systemDefined (media keys sent by F-keys on MacBooks)
+        // Mask covers keyDown + systemDefined (media keys sent by F-keys on
+        // MacBooks) + flagsChanged so the watchdog's modifier probe can arrive.
         let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) |
+                   CGEventMask(1 << CGEventType.flagsChanged.rawValue) |
                    CGEventMask(1 << 14) // 14 = systemDefined (media/function keys)
 
         guard let tap = CGEvent.tapCreate(
@@ -636,6 +650,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             eventsOfInterest: mask,
             callback: { _, type, event, refcon in
                 let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
+                // Any delivered event proves the tap is alive — clears the
+                // watchdog probe whether it was ours or a real keypress.
+                delegate.probePending = false
                 // macOS disables a tap whose callback runs long (timeout) or that the
                 // user/system disabled; without re-enabling, the next hotkey press is
                 // silently swallowed.
@@ -647,7 +664,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     return nil
                 }
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-                print("[tap] event type: \(type.rawValue)  keyCode: \(keyCode)")
+                if type != .flagsChanged {   // modifiers + our own probes aren't interesting
+                    print("[tap] event type: \(type.rawValue)  keyCode: \(keyCode)")
+                }
                 guard keyCode == 176 else {
                     return Unmanaged.passRetained(event)
                 }
@@ -665,8 +684,81 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         keyTap = tap   // kept for re-enable when the system disables the tap
         print("[tap] tap created successfully")
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        keyTapSource = source
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        startTapWatchdog()
+
+        // Test hooks: simulate the two ways a tap dies so the watchdog's
+        // recovery paths can be exercised deterministically. They fire once —
+        // a rebuilt tap must not re-arm them.
+        if tapTestFired { return }
+        if CommandLine.arguments.contains("--tap-disable-test") {
+            tapTestFired = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                if let tap = self?.keyTap {
+                    CGEvent.tapEnable(tap: tap, enable: false)
+                    print("[tap] TEST: tap disabled")
+                }
+            }
+        } else if CommandLine.arguments.contains("--tap-kill-test") {
+            tapTestFired = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                if let tap = self?.keyTap {
+                    CFMachPortInvalidate(tap)
+                    print("[tap] TEST: tap port invalidated")
+                }
+            }
+        }
+    }
+
+    // The tap's disable notification is the fast path — but the port can also die
+    // silently (all events stop arriving with no notification). The watchdog posts
+    // a probe keycode through the tap every tick; a probe that never comes back
+    // means the port is dead, so the whole tap is rebuilt.
+    private func startTapWatchdog() {
+        tapWatchdog?.invalidate()
+        tapWatchdog = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            self?.tapWatchdogTick()
+        }
+    }
+
+    private func tapWatchdogTick() {
+        if probePending {
+            print("[tap] watchdog: probe lost — event tap is dead, rebuilding")
+            rebuildTap()
+            return
+        }
+        if let tap = keyTap {
+            if !CFMachPortIsValid(tap) {
+                print("[tap] watchdog: tap port invalid — rebuilding")
+                rebuildTap()
+                return
+            }
+            if !CGEvent.tapIsEnabled(tap: tap) {
+                print("[tap] watchdog: tap disabled — re-enabling")
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+        }
+        let src = CGEventSource(stateID: .combinedSessionState)
+        guard let ev = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(tapProbeKeyCode), keyDown: false) else { return }
+        ev.type = .flagsChanged
+        ev.flags = []
+        probePending = true
+        ev.post(tap: .cghidEventTap)
+    }
+
+    private func rebuildTap() {
+        if let src = keyTapSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), src, .commonModes)
+        }
+        if let tap = keyTap {
+            CFMachPortInvalidate(tap)
+        }
+        keyTap = nil
+        keyTapSource = nil
+        probePending = false
+        keyPressInterception()
     }
     
     private func Action(){
