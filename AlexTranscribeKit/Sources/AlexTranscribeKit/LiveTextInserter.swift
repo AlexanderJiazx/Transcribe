@@ -56,6 +56,11 @@ public final class LiveTextInserter {
     /// True once content verification failed — remaining updates append diffs at the caret.
     private var appendOnly = false
 
+    /// The text currently occupying our tracked range in the field (what ``update`` last
+    /// wrote). Callers use it to compute keep-prefixes that match reality — the shown
+    /// transcript can be one tick ahead of what was actually delivered.
+    public var currentText: String { lastInserted }
+
     public init() {}
 
     /// Reset per-session state. Call when a new dictation starts.
@@ -89,6 +94,9 @@ public final class LiveTextInserter {
             // new element's caret (any stale text we left in the old field stays put).
             element = el
             resetTracking()
+            var roleRef: CFTypeRef?
+            AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
+            print("[insert] focused el role=\(roleRef as? String ?? "?")")
         }
 
         var settable = DarwinBoolean(false)
@@ -117,6 +125,7 @@ public final class LiveTextInserter {
                 lastInserted = text
                 deliveredViaAX = true
             } else {
+                print("[insert] tracked-range verify/write failed at \(tracked.location)+\(tracked.length)")
                 // User edited inside (or the range can't be read): never overwrite
                 // unknown content — degrade to caret-appends from here on.
                 appendOnly = true
@@ -126,9 +135,28 @@ public final class LiveTextInserter {
         }
 
         // First write into this element: insert at caret, remember where it began.
-        let caret = selectedRange(el)?.location ?? characterCount(el) ?? 0
-        if setSelectedText(el, text) {
-            anchorStart = caret
+        let sel = selectedRange(el)
+        let caret = sel?.location ?? characterCount(el) ?? 0
+        print("[insert] first write: sel=\(sel.map { "\($0.location)+\($0.length)" } ?? "nil") caret=\(caret)")
+        // Dictation convention: separate our text from adjacent existing text with a
+        // space when the caret/selection sits right against a non-space character.
+        var prefix = ""
+        var suffix = ""
+        let selStart = sel?.location ?? caret
+        let selEnd = selStart + (sel?.length ?? 0)
+        if selStart > 0,
+           let prev = stringForRange(el, CFRange(location: selStart - 1, length: 1)),
+           let c = prev.unicodeScalars.first,
+           !CharacterSet.whitespacesAndNewlines.contains(c) {
+            prefix = " "
+        }
+        if let next = stringForRange(el, CFRange(location: selEnd, length: 1)),
+           let c = next.unicodeScalars.first,
+           !CharacterSet.whitespacesAndNewlines.contains(c) {
+            suffix = " "
+        }
+        if setSelectedText(el, prefix + text + suffix) {
+            anchorStart = caret + prefix.utf16.count
             insertedLen = text.utf16.count
             lastInserted = text
             deliveredViaAX = true

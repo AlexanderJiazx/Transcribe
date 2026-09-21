@@ -293,6 +293,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let wn = words.map(normalizeWord)
 
         var k = 0, s = 0
+        var resynced = false
         if shownWords.isEmpty {
             s = 0; k = 0                       // first decode: whole hyp is the tail
         } else {
@@ -306,6 +307,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     print("[stream] alignment resync after \(alignMisses) misses")
                     alignMisses = 0
                     s = committedCount; k = 0
+                    resynced = true
                 } else {
                     return
                 }
@@ -319,8 +321,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let tailFrom = max(k, committedCount - s)
         // 2-of-2 vote on new tail words: W[tailFrom+i] sits at shown position
         // s+tailFrom+i; prevTailNorm[j] sat at prevBoundary+j → j = i + (s+tailFrom-prevBoundary).
+        // Commit votes only count on a real anchor — after a resync the previous
+        // tail alignment is meaningless, so nothing new gets committed that tick.
         var extra = 0
-        if prevBoundary >= 0 {
+        if !resynced, prevBoundary >= 0 {
             let d = s + tailFrom - prevBoundary
             while tailFrom + extra < words.count - 2 {
                 let j = extra + d
@@ -426,19 +430,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     samples: samples, sampleRate: rate, verbose: false)
                 // Drop the ending . and 。
                 let text = textPostProcessing(for: rawText)
-                // Reuse only what genuinely matches the committed text already shown —
-                // the final decode may re-punctuate inside the committed span.
-                let keep = utf16CommonPrefix(self.committedText, text)
                 DispatchQueue.main.async {
-                    // Final write through AX (replaces only the live tail), then clipboard.
+                    // Rewrite everything from the first divergence between what's in
+                    // the field and the final decode — committed text that disagrees
+                    // with the final transcript must not stay frozen in the document.
+                    // `currentText` (not the streaming state) is ground truth here:
+                    // a partial dropped at stop can leave shownText a tick ahead.
+                    let keep = self.utf16CommonPrefix(self.inserter.currentText, text)
+                    // Final write through AX (replaces only the divergent tail), then clipboard.
                     // Clipboard is set before the fallback so a needed ⌘V pastes text.
                     let mode = self.inserter.finish(text, keepPrefix: keep)
-                    let pb = NSPasteboard.general
-                    pb.clearContents()
-                    pb.setString(text, forType: .string)
+                    // An empty transcript (silence/accidental tap) must not clobber
+                    // the user's clipboard, and a ⌘V fallback would paste stale text.
+                    if !text.isEmpty {
+                        let pb = NSPasteboard.general
+                        pb.clearContents()
+                        pb.setString(text, forType: .string)
+                    }
                     print("[transcribe] copied \(text.count) chars to clipboard; delivery=\(mode)")
 
-                    if mode == .pasteFallback {
+                    if mode == .pasteFallback, !text.isEmpty {
                         // The focused field refused AX writes — fall back to ⌘V paste of
                         // the clipboard we just set (the old delivery mechanism).
                         LiveTextInserter.pasteClipboard()
