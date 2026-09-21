@@ -329,6 +329,32 @@ public final class LiveTextInserter {
             }
         }
 
+        // Undo/⌘Z mid-dictation can leave an EARLIER revision of our text at the
+        // anchor — the surviving span shares a long prefix with `text` (diverging
+        // where the model has since revised). Replace the span wholesale so the
+        // field ends exactly with the transcript instead of carrying the stale
+        // prefix plus a re-appended copy.
+        if let start = anchorStart, start <= docLen, ourLen > 0,
+           let seg = stringForRange(el, CFRange(location: start, length: docLen - start)),
+           !seg.isEmpty,
+           !seg.hasPrefix(lastInserted) {
+            // (seg starting with lastInserted = our full text plus a user tail —
+            // that case belongs to the delta-append path below, not a rewrite.)
+            let prefixMatch = commonPrefixLength(seg, text)
+            if prefixMatch >= 8 || (!seg.isEmpty && prefixMatch == seg.utf16.count) {
+                let span = CFRange(location: start, length: docLen - start)
+                if setSelectedRange(el, span),
+                   selectionIs(el, span),
+                   setSelectedText(el, text),
+                   stringForRange(el, CFRange(location: start, length: text.utf16.count)) == text {
+                    print("[insert] replaced stale earlier-revision span at \(start)")
+                    lastInserted = text
+                    deliveredViaAX = true
+                    return
+                }
+            }
+        }
+
         // Our text isn't at the tail at all.
         if ourLen == 0 || fieldStillContainsOurText(el, docLen: docLen) {
             // It's intact mid-field (user typed after it, or caret sits elsewhere) —
