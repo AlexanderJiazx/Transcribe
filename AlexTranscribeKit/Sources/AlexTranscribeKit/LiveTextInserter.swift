@@ -1,3 +1,4 @@
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -124,7 +125,10 @@ public final class LiveTextInserter {
             resetTracking()
             var roleRef: CFTypeRef?
             AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
-            print("[insert] focused el role=\(roleRef as? String ?? "?")")
+            var pid: pid_t = 0
+            AXUIElementGetPid(el, &pid)
+            let owner = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?"
+            print("[insert] focused el role=\(roleRef as? String ?? "?") app=\(owner)")
         }
 
         if appendOnly {
@@ -180,18 +184,11 @@ public final class LiveTextInserter {
             // never reach their content — verify the write landed before trusting
             // this element for the session, else degrade to the paste fallback.
             let wrote = prefix + text + suffix
-            let wRange = CFRange(location: caret, length: wrote.utf16.count)
-            let landed = stringForRange(el, wRange) == wrote
-                || selectedRange(el)?.location == caret + wrote.utf16.count
-            if landed {
+            if writeLanded(el, at: caret, wrote: wrote) {
                 anchorStart = caret + prefix.utf16.count
                 insertedLen = text.utf16.count
                 lastInserted = text
                 deliveredViaAX = true
-            } else {
-                print("[insert] write evaporated — element not AX-writeable")
-                insertionSupported = false
-                unwriteable = el
             }
         }
     }
@@ -222,24 +219,129 @@ public final class LiveTextInserter {
     /// Insert only the part of `text` beyond the longest common prefix with what we last
     /// wrote. Revisions inside already-written text are skipped — without a tracked range
     /// we can't remove them without risking user text.
+    ///
+    /// Before appending we check where our previous text actually is in the field:
+    /// - If it's still the contiguous tail, we can replace it in place — revisions
+    ///   stay clean even in degraded mode.
+    /// - If it's gone entirely (user undid/deleted our text), appending only the
+    ///   delta would silently lose the earlier transcript — re-append the whole
+    ///   current text at the caret so nothing is dropped.
     private func appendDelta(_ el: AXUIElement, text: String) {
+        let ourLen = lastInserted.utf16.count
+        let docLen = characterCount(el) ?? 0
         let lcp = commonPrefixLength(lastInserted, text)
-        if lcp == lastInserted.utf16.count {
-            // decoding (not init) so a split surrogate pair can't fail the whole write
-            let suffix = String(decoding: text.utf16.dropFirst(lcp), as: UTF16.self)
-            let caretBefore = selectedRange(el)?.location
-            if !suffix.isEmpty, setSelectedText(el, suffix) {
-                // Same evaporation check as the first write — claim delivery only if
-                // the caret actually advanced past the appended text.
-                if let c = caretBefore, selectedRange(el)?.location == c + suffix.utf16.count {
+
+        // How much of our last write still ends the field? 0 = our text isn't at the
+        // tail (deleted/undone, or the user typed after it).
+        var kept = 0
+        let tailLen = min(ourLen, docLen)
+        if tailLen > 0,
+           let tail = stringForRange(el, CFRange(location: docLen - tailLen, length: tailLen)) {
+            let tU = Array(tail.utf16)
+            let lU = Array(lastInserted.utf16)
+            var p = min(tU.count, lU.count)
+            while p > 0 && !(Array(tU[(tU.count - p)...]) == Array(lU[0..<p])) {
+                p -= 1
+            }
+            kept = p
+        }
+
+        // Tail fully intact → replace our whole contribution in place so tail
+        // revisions stay clean even in degraded mode.
+        if kept == ourLen, ourLen > 0 {
+            let tailRange = CFRange(location: docLen - ourLen, length: ourLen)
+            if setSelectedRange(el, tailRange), setSelectedText(el, text),
+               writeLanded(el, at: docLen - ourLen, wrote: text) {
+                lastInserted = text
+                deliveredViaAX = true
+                return
+            }
+        }
+
+        // Partial tail survives (e.g. undo of just our last write): complete it so
+        // the field still ends with the full transcript.
+        if kept > 0 {
+            if kept <= lcp {
+                // Surviving tail is also a prefix of the new text — append the rest.
+                let suffix = String(decoding: text.utf16.dropFirst(kept), as: UTF16.self)
+                if setSelectedRange(el, CFRange(location: docLen, length: 0)),
+                   setSelectedText(el, suffix),
+                   writeLanded(el, at: docLen, wrote: suffix) {
+                    lastInserted = text
                     deliveredViaAX = true
-                } else {
-                    print("[insert] append evaporated — element not AX-writeable")
-                    insertionSupported = false
+                    return
+                }
+            } else {
+                // Tail includes text the model revised away — replace just the
+                // divergent chunk at the field end.
+                let divLen = kept - lcp
+                let repl = String(decoding: text.utf16.dropFirst(lcp), as: UTF16.self)
+                if setSelectedRange(el, CFRange(location: docLen - divLen, length: divLen)),
+                   setSelectedText(el, repl),
+                   writeLanded(el, at: docLen - divLen, wrote: repl) {
+                    lastInserted = text
+                    deliveredViaAX = true
+                    return
                 }
             }
         }
-        lastInserted = text
+
+        // Our text isn't at the tail at all.
+        if ourLen == 0 || fieldStillContainsOurText(el, docLen: docLen) {
+            // It's intact mid-field (user typed after it, or caret sits elsewhere) —
+            // append only the delta at the caret like the classic path.
+            if lcp == lastInserted.utf16.count {
+                // decoding (not init) so a split surrogate pair can't fail the whole write
+                let suffix = String(decoding: text.utf16.dropFirst(lcp), as: UTF16.self)
+                let caret = selectedRange(el)?.location ?? docLen
+                if !suffix.isEmpty, setSelectedText(el, suffix),
+                   writeLanded(el, at: caret, wrote: suffix) {
+                    deliveredViaAX = true
+                }
+            }
+            lastInserted = text
+            return
+        }
+
+        // Deleted/undone entirely — re-append the whole current transcript at the
+        // field end so nothing is silently dropped.
+        print("[insert] our text no longer in field — re-appending full transcript")
+        var prefix = ""
+        if docLen > 0,
+           let prev = stringForRange(el, CFRange(location: docLen - 1, length: 1)),
+           let c = prev.unicodeScalars.first,
+           !CharacterSet.whitespacesAndNewlines.contains(c) {
+            prefix = " "
+        }
+        let wrote = prefix + text
+        if setSelectedRange(el, CFRange(location: docLen, length: 0)),
+           setSelectedText(el, wrote),
+           writeLanded(el, at: docLen, wrote: wrote) {
+            lastInserted = text
+            deliveredViaAX = true
+        }
+    }
+
+    /// True if `lastInserted` still appears within the last ~`lastInserted+512` chars
+    /// of the element — distinguishes "user typed after our text" from "our text was
+    /// deleted/undone" when it isn't the field tail.
+    private func fieldStillContainsOurText(_ el: AXUIElement, docLen: Int) -> Bool {
+        let ourLen = lastInserted.utf16.count
+        guard ourLen > 0, docLen > 0 else { return false }
+        let w = CFRange(location: max(0, docLen - ourLen - 512), length: min(docLen, ourLen + 512))
+        return stringForRange(el, w)?.contains(lastInserted) ?? false
+    }
+
+    /// Verify a write actually reached the element: the range now contains what we
+    /// wrote, or the caret advanced past it. Some fields accept AX writes that
+    /// silently evaporate — those get marked unwriteable so delivery degrades to paste.
+    private func writeLanded(_ el: AXUIElement, at loc: Int, wrote: String) -> Bool {
+        if stringForRange(el, CFRange(location: loc, length: wrote.utf16.count)) == wrote { return true }
+        if selectedRange(el)?.location == loc + wrote.utf16.count { return true }
+        print("[insert] write evaporated — element not AX-writeable")
+        insertionSupported = false
+        unwriteable = el
+        return false
     }
 
     private func commonPrefixLength(_ a: String, _ b: String) -> Int {
