@@ -99,23 +99,37 @@ public final class LiveTextInserter {
         // that received partials should still get the rest of the transcript.
         var el: AXUIElement
         if let f = focusedElement(), !(unwriteable.map { CFEqual($0, f) } ?? false) {
-            var settable = DarwinBoolean(false)
-            if AXUIElementIsAttributeSettable(f, kAXSelectedTextAttribute as CFString, &settable) == .success,
-               settable.boolValue {
+            if let prev = element, anchorStart != nil, CFEqual(prev, f) {
+                // Same element we already adopted — known text-settable; don't
+                // re-ask (AXUIElementIsAttributeSettable can transiently fail
+                // while the target app's AX server is busy, which would stall
+                // every subsequent tick).
                 el = f
-            } else if let prev = element, anchorStart != nil, !CFEqual(prev, f) {
-                el = prev
             } else {
-                insertionSupported = false
-                return
+                var settable = DarwinBoolean(false)
+                if AXUIElementIsAttributeSettable(f, kAXSelectedTextAttribute as CFString, &settable) == .success,
+                   settable.boolValue {
+                    el = f
+                } else if let prev = element, anchorStart != nil {
+                    el = prev
+                } else {
+                    insertionSupported = false
+                    print("[insert] focused element not text-settable and no anchor — update dropped")
+                    return
+                }
             }
         } else if let prev = element, anchorStart != nil {
             el = prev
         } else {
             insertionSupported = false
+            print("[insert] no focused element and no anchor — update dropped")
             return
         }
-        if let bad = unwriteable, CFEqual(bad, el) { insertionSupported = false; return }
+        if let bad = unwriteable, CFEqual(bad, el) {
+            insertionSupported = false
+            print("[insert] target element is unwriteable — update dropped")
+            return
+        }
         insertionSupported = true
 
         if element == nil || !CFEqual(element!, el) {
@@ -142,12 +156,33 @@ public final class LiveTextInserter {
             let tracked = CFRange(location: start + keep, length: insertedLen - keep)
             let oldSuffix = String(decoding: lastInserted.utf16.dropFirst(keep), as: UTF16.self)
             let newSuffix = String(decoding: text.utf16.dropFirst(keep), as: UTF16.self)
+            let docLenBefore = characterCount(el)
             if stringForRange(el, tracked) == oldSuffix,
                setSelectedRange(el, tracked),
+               selectionIs(el, tracked),
                setSelectedText(el, newSuffix) {
-                insertedLen = text.utf16.count
-                lastInserted = text
-                deliveredViaAX = true
+                // Post-verify: the doc must now contain `text` at our anchor and have
+                // grown by exactly (newSuffix - oldSuffix). Some apps apply the
+                // selection set asynchronously, so the write can land as an append
+                // at a stale caret — that leaves a stray copy and keeps our old
+                // text; repair it instead of trusting the write.
+                if let before = docLenBefore,
+                   let docLenAfter = characterCount(el),
+                   docLenAfter == before - tracked.length + newSuffix.utf16.count,
+                   stringForRange(el, CFRange(location: start, length: text.utf16.count)) == text {
+                    insertedLen = text.utf16.count
+                    lastInserted = text
+                    deliveredViaAX = true
+                } else if let before = docLenBefore,
+                          repairMisplacedWrite(el, start: start, docLenBefore: before, oldLen: insertedLen, text: text, strayText: newSuffix) {
+                    insertedLen = text.utf16.count
+                    lastInserted = text
+                    deliveredViaAX = true
+                } else {
+                    print("[insert] tracked write misplaced and not repairable at \(start) — degrade")
+                    appendOnly = true
+                    appendDelta(el, text: text)
+                }
             } else {
                 print("[insert] tracked-range verify/write failed at \(tracked.location)+\(tracked.length)")
                 // User edited inside (or the range can't be read): never overwrite
@@ -198,6 +233,14 @@ public final class LiveTextInserter {
     @discardableResult
     public func finish(_ text: String, keepPrefix: Int = 0) -> DeliveryMode {
         update(text, keepPrefix: keepPrefix)
+        // If the final text never landed (an update bailed mid-session, or an AX
+        // write silently failed after the last successful one), the document is
+        // guaranteed incomplete — report pasteFallback so the caller drops the
+        // full transcript in via the clipboard instead of leaving a truncated tail.
+        if deliveredViaAX, lastInserted != text {
+            print("[insert] final text not delivered via AX (have \(lastInserted.utf16.count) of \(text.utf16.count) chars) — pasteFallback")
+            return .pasteFallback
+        }
         return deliveredViaAX ? .accessibility : .pasteFallback
     }
 
@@ -293,13 +336,23 @@ public final class LiveTextInserter {
             if lcp == lastInserted.utf16.count {
                 // decoding (not init) so a split surrogate pair can't fail the whole write
                 let suffix = String(decoding: text.utf16.dropFirst(lcp), as: UTF16.self)
+                if suffix.isEmpty {
+                    lastInserted = text
+                    return
+                }
                 let caret = selectedRange(el)?.location ?? docLen
-                if !suffix.isEmpty, setSelectedText(el, suffix),
+                if setSelectedText(el, suffix),
                    writeLanded(el, at: caret, wrote: suffix) {
+                    lastInserted = text
                     deliveredViaAX = true
                 }
+                // On failure lastInserted stays stale — finish() detects the gap
+                // and falls back to paste so the transcript isn't truncated.
+            } else {
+                // The tail revision changed already-delivered text mid-field —
+                // we can't safely rewrite there, but the field still holds a
+                // complete earlier transcript state; keep lastInserted honest.
             }
-            lastInserted = text
             return
         }
 
@@ -330,6 +383,39 @@ public final class LiveTextInserter {
         guard ourLen > 0, docLen > 0 else { return false }
         let w = CFRange(location: max(0, docLen - ourLen - 512), length: min(docLen, ourLen + 512))
         return stringForRange(el, w)?.contains(lastInserted) ?? false
+    }
+
+    /// True if the element's current selection is exactly `r` — used after
+    /// `AXSelectedTextRange` writes, since some apps apply them asynchronously and
+    /// a following `AXSelectedText` write would land at the stale caret.
+    private func selectionIs(_ el: AXUIElement, _ r: CFRange) -> Bool {
+        guard let sel = selectedRange(el) else { return false }
+        return sel.location == r.location && sel.length == r.length
+    }
+
+    /// Repair after a tracked write landed somewhere other than its range (e.g.
+    /// appended at the doc tail at a stale caret): delete the stray tail copy,
+    /// rewrite our whole tracked span with `text`, then verify.
+    private func repairMisplacedWrite(_ el: AXUIElement, start: Int, docLenBefore: Int, oldLen: Int, text: String, strayText: String) -> Bool {
+        guard let docLen = characterCount(el) else { return false }
+        // Stray append at doc tail: [docLenBefore, docLen) is text the misplaced
+        // write added — remove it before rewriting our span. Only delete when it
+        // exactly matches what we wrote; anything else may be user content.
+        if docLen > docLenBefore {
+            let stray = CFRange(location: docLenBefore, length: docLen - docLenBefore)
+            guard stringForRange(el, stray) == strayText,
+                  setSelectedRange(el, stray),
+                  selectionIs(el, stray),
+                  setSelectedText(el, "") else { return false }
+        }
+        // Our span [start, start+oldLen) still holds the previous text — it was
+        // verified to be ours before the write — replace it wholesale.
+        let span = CFRange(location: start, length: oldLen)
+        guard let docLen2 = characterCount(el), docLen2 >= start + oldLen,
+              setSelectedRange(el, span),
+              selectionIs(el, span),
+              setSelectedText(el, text) else { return false }
+        return stringForRange(el, CFRange(location: start, length: text.utf16.count)) == text
     }
 
     /// Verify a write actually reached the element: the range now contains what we
