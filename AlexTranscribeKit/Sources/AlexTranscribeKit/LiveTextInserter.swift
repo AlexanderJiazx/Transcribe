@@ -55,6 +55,9 @@ public final class LiveTextInserter {
     private var lastInserted = ""
     /// True once content verification failed — remaining updates append diffs at the caret.
     private var appendOnly = false
+    /// Element whose writes evaporated (fake-success AX writes on e.g. web text
+    /// fields). Once marked, we stop attempting writes to it for this session.
+    private var unwriteable: AXUIElement?
 
     /// The text currently occupying our tracked range in the field (what ``update`` last
     /// wrote). Callers use it to compute keep-prefixes that match reality — the shown
@@ -68,6 +71,7 @@ public final class LiveTextInserter {
         deliveredViaAX = false
         insertionSupported = true
         element = nil
+        unwriteable = nil
         resetTracking()
     }
 
@@ -88,6 +92,7 @@ public final class LiveTextInserter {
     public func update(_ text: String, keepPrefix: Int = 0) {
         guard text != lastInserted else { return }
         guard let el = focusedElement() else { return }
+        if let bad = unwriteable, CFEqual(bad, el) { return }
 
         if element == nil || !CFEqual(element!, el) {
             // First element seen this session, or focus moved mid-session: anchor at the
@@ -156,10 +161,23 @@ public final class LiveTextInserter {
             suffix = " "
         }
         if setSelectedText(el, prefix + text + suffix) {
-            anchorStart = caret + prefix.utf16.count
-            insertedLen = text.utf16.count
-            lastInserted = text
-            deliveredViaAX = true
+            // Some elements (e.g. web text fields) accept AXSelectedText writes that
+            // never reach their content — verify the write landed before trusting
+            // this element for the session, else degrade to the paste fallback.
+            let wrote = prefix + text + suffix
+            let wRange = CFRange(location: caret, length: wrote.utf16.count)
+            let landed = stringForRange(el, wRange) == wrote
+                || selectedRange(el)?.location == caret + wrote.utf16.count
+            if landed {
+                anchorStart = caret + prefix.utf16.count
+                insertedLen = text.utf16.count
+                lastInserted = text
+                deliveredViaAX = true
+            } else {
+                print("[insert] write evaporated — element not AX-writeable")
+                insertionSupported = false
+                unwriteable = el
+            }
         }
     }
 
@@ -194,8 +212,16 @@ public final class LiveTextInserter {
         if lcp == lastInserted.utf16.count {
             // decoding (not init) so a split surrogate pair can't fail the whole write
             let suffix = String(decoding: text.utf16.dropFirst(lcp), as: UTF16.self)
+            let caretBefore = selectedRange(el)?.location
             if !suffix.isEmpty, setSelectedText(el, suffix) {
-                deliveredViaAX = true
+                // Same evaporation check as the first write — claim delivery only if
+                // the caret actually advanced past the appended text.
+                if let c = caretBefore, selectedRange(el)?.location == c + suffix.utf16.count {
+                    deliveredViaAX = true
+                } else {
+                    print("[insert] append evaporated — element not AX-writeable")
+                    insertionSupported = false
+                }
             }
         }
         lastInserted = text
