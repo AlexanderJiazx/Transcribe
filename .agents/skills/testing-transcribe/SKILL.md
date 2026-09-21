@@ -67,6 +67,20 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
 - Debug prints in LiveTextInserter (`[insert] focused el role=…`, `first write`,
   `tracked-range verify/write failed`) are load-bearing for these tests — keep
   them while testing.
+- **Web fields (Chrome)**: AXSelectedText writes into Chromium web text fields
+  return success but never reach the DOM ("evaporated"). The inserter verifies
+  each first-write/append landed (read-back or caret advance) and prints
+  `[insert] write evaporated — element not AX-writeable`; delivery falls to
+  `pasteFallback` and ⌘V pastes the final transcript. Password fields can drop
+  the synthetic ⌘V too — transcript still lands on the clipboard. To make
+  Chrome expose its web AX tree at all, set `AXEnhancedUserInterface` on the
+  process first (`System Events` attr) and click into the field.
+- **Spotlight** (`key code 49 using command down`): live AX insertion works —
+  transcript streams into the search field.
+- **Select-all then dictate**: `first write: sel=0+<docLen>` replaces the whole
+  selection — same as typing.
+- **Scrolled-away caret**: insertion is coordinate-free — text lands at the
+  caret even when the doc is scrolled so the caret is off-screen.
 
 ## Gotchas observed
 - The CGEvent tap can be disabled by timeout — log shows `event type:
