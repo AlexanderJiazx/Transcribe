@@ -91,8 +91,31 @@ public final class LiveTextInserter {
     /// already-written text visually stable instead of flickering on every revision.
     public func update(_ text: String, keepPrefix: Int = 0) {
         guard text != lastInserted else { return }
-        guard let el = focusedElement() else { return }
-        if let bad = unwriteable, CFEqual(bad, el) { return }
+
+        // Resolve the write target. Prefer the focused element; when it can't take
+        // text (no focus, desktop, or a non-text element like Finder's file list),
+        // keep delivering to the field already holding our partial text — a doc
+        // that received partials should still get the rest of the transcript.
+        var el: AXUIElement
+        if let f = focusedElement(), !(unwriteable.map { CFEqual($0, f) } ?? false) {
+            var settable = DarwinBoolean(false)
+            if AXUIElementIsAttributeSettable(f, kAXSelectedTextAttribute as CFString, &settable) == .success,
+               settable.boolValue {
+                el = f
+            } else if let prev = element, anchorStart != nil, !CFEqual(prev, f) {
+                el = prev
+            } else {
+                insertionSupported = false
+                return
+            }
+        } else if let prev = element, anchorStart != nil {
+            el = prev
+        } else {
+            insertionSupported = false
+            return
+        }
+        if let bad = unwriteable, CFEqual(bad, el) { insertionSupported = false; return }
+        insertionSupported = true
 
         if element == nil || !CFEqual(element!, el) {
             // First element seen this session, or focus moved mid-session: anchor at the
@@ -103,14 +126,6 @@ public final class LiveTextInserter {
             AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
             print("[insert] focused el role=\(roleRef as? String ?? "?")")
         }
-
-        var settable = DarwinBoolean(false)
-        guard AXUIElementIsAttributeSettable(el, kAXSelectedTextAttribute as CFString, &settable) == .success,
-              settable.boolValue else {
-            insertionSupported = false
-            return
-        }
-        insertionSupported = true
 
         if appendOnly {
             appendDelta(el, text: text)
