@@ -35,6 +35,34 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
    (`delivery=pasteFallback` + one ⌘V if the field refuses AX writes). Overlay
    hides; `pbpaste` holds the final transcript (trailing `.`/`。` stripped).
 
+## Extended battery (added after local-agreement rewrite)
+- **Mid-doc insertion**: click into the text area first (arrow-key AppleScript
+  does not move the caret unless the text area is focused). Verify with
+  `[insert] first write: sel=<loc>+<len> caret=<n>` in /tmp/app.out — loc must
+  match where you clicked. Dictation auto-inserts a boundary space on each side
+  when the caret sits against non-space text.
+- **Selection replace**: select text via `key code 124 using shift down` repeats,
+  confirm with `AXSelectedText` — dictation replaces the selection.
+- **Focus switch mid-record**: AXRaise another TextEdit window mid-feed; the old
+  doc keeps its frozen partial, the new doc receives the full transcript at its
+  caret (`[insert] first write` appears again for the new element).
+- **Hotkey spam during final decode**: presses are ignored (no `[record]`
+  markers between `captured` and `copied`); the next press after `copied`
+  starts a clean session.
+- **Silence feed** (`b'\x00'*N` PCM): transcript is empty — clipboard must NOT
+  be clobbered and no ⌘V is posted (log still says `delivery=pasteFallback`).
+- **Pathological repeated audio** (concat the same phrase 3×): expect
+  `[stream] alignment resync after 3 misses` lines — resyncs replace the tail
+  only, never commit. Final doc must equal `pbpaste` byte-for-byte; a
+  `[insert] tracked-range verify/write failed` line means the doc was left
+  divergent (that was the resync-commit bug — fixed).
+- Sequenced dictations in one doc anchor at the end-of-text caret
+  (`sel=<N>+0 caret=<N>`) with auto-space, so N sessions produce N
+  space-separated transcripts.
+- Debug prints in LiveTextInserter (`[insert] focused el role=…`, `first write`,
+  `tracked-range verify/write failed`) are load-bearing for these tests — keep
+  them while testing.
+
 ## Gotchas observed
 - The CGEvent tap can be disabled by timeout — log shows `event type:
   4294967294 keyCode: 0` (kCGEventTapDisabledByTimeout) and the posted hotkey is
