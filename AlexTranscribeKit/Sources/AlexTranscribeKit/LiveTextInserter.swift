@@ -74,7 +74,13 @@ public final class LiveTextInserter {
     }
 
     /// Write (or revise) the cumulative transcription `text` in the focused field.
-    public func update(_ text: String) {
+    ///
+    /// `keepPrefix` is the number of UTF-16 units from the start of `text` (and of what
+    /// we previously wrote) that are stable/committed: that prefix is never re-selected
+    /// or rewritten — only the volatile tail after it is replaced in place. Passing the
+    /// committed-text length each update makes long dictations update cheaply and keeps
+    /// already-written text visually stable instead of flickering on every revision.
+    public func update(_ text: String, keepPrefix: Int = 0) {
         guard text != lastInserted else { return }
         guard let el = focusedElement() else { return }
 
@@ -99,11 +105,14 @@ public final class LiveTextInserter {
         }
 
         if let start = anchorStart {
-            // Verify the tracked range still holds exactly our last text before replacing.
-            let tracked = CFRange(location: start, length: insertedLen)
-            if stringForRange(el, tracked) == lastInserted,
+            // Only replace the tail after the committed prefix; the prefix must never move.
+            let keep = min(keepPrefix, insertedLen, text.utf16.count)
+            let tracked = CFRange(location: start + keep, length: insertedLen - keep)
+            let oldSuffix = String(decoding: lastInserted.utf16.dropFirst(keep), as: UTF16.self)
+            let newSuffix = String(decoding: text.utf16.dropFirst(keep), as: UTF16.self)
+            if stringForRange(el, tracked) == oldSuffix,
                setSelectedRange(el, tracked),
-               setSelectedText(el, text) {
+               setSelectedText(el, newSuffix) {
                 insertedLen = text.utf16.count
                 lastInserted = text
                 deliveredViaAX = true
@@ -127,10 +136,10 @@ public final class LiveTextInserter {
     }
 
     /// Final update for the session. Returns how text was delivered so the caller can
-    /// decide whether a paste fallback is needed.
+    /// decide whether a paste fallback is needed. `keepPrefix` works like in ``update``.
     @discardableResult
-    public func finish(_ text: String) -> DeliveryMode {
-        update(text)
+    public func finish(_ text: String, keepPrefix: Int = 0) -> DeliveryMode {
+        update(text, keepPrefix: keepPrefix)
         return deliveredViaAX ? .accessibility : .pasteFallback
     }
 

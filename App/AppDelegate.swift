@@ -52,10 +52,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// emissions queued on main from a previous session are dropped, never written.
     private var sessionID = 0
     /// Re-run transcription once this much *new* audio has accumulated since the last pass.
-    private let tickAudioInterval: Double = 1.8   // seconds
+    private let tickAudioInterval: Double = 1.0   // seconds
     /// Don't start partial passes until this much audio exists (also clears the mel
     /// front-end's 201-sample minimum with margin).
-    private let minTickAudio: Double = 1.0        // seconds
+    private let minTickAudio: Double = 0.7        // seconds
+    /// Decode window cap for live ticks. Re-decoding the *whole* buffer every tick is
+    /// O(n²) work that falls behind real speech; bounding the window keeps each tick's
+    /// cost constant so partials arrive within a couple of seconds of being spoken.
+    private let maxTickWindow: Double = 12.0      // seconds
+    /// Words committed via local agreement never change again — only the tail is live.
+    /// shownWords = committed prefix + revisable tail (what's on screen).
+    /// committedEndSample tracks where committed audio ends; each tick's window start is
+    /// anchored there or at the window cap — but correctness comes from aligning each new
+    /// hypothesis onto shownWords by suffix overlap, not from the cursor estimate.
+    private var shownWords: [String] = []
+    private var committedCount = 0
+    private var committedEndSample = 0
+    private var prevTailNorm: [String] = []   // previous hyp's tail words, normalized
+    private var prevBoundary = -1             // shown-index where the previous tail began
+    private var alignMisses = 0
+
+    private var committedText: String {
+        shownWords.prefix(committedCount).joined(separator: " ")
+    }
 
     // Particle overlay shown inside the window during record + transcribe.
     private var skView: SKView?
@@ -206,41 +225,161 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         streamLock.lock()
         streamingActive = true
         lastTickSampleCount = 0
+        shownWords = []
+        committedCount = 0
+        committedEndSample = 0
+        prevTailNorm = []
+        prevBoundary = -1
+        alignMisses = 0
         streamLock.unlock()
         transcribeQueue.async { [weak self] in self?.streamingLoop(session: session) }
     }
 
-    /// Re-transcribe the growing capture every `tickAudioInterval` seconds of new audio.
+    /// Local-agreement streaming decode. Each tick re-decodes only the audio since the
+    /// last committed word (bounded by `maxTickWindow`), then compares word-level with
+    /// the previous hypothesis: the longest common prefix — minus a two-word safety
+    /// margin — is committed forever; only the divergent tail stays live. Committed
+    /// words are never re-decoded or rewritten, so visible text grows stably and per-tick
+    /// cost stays constant instead of growing with the recording.
     /// Runs on transcribeQueue until endRecord clears `streamingActive`; an in-flight
     /// pass aborts early via `isCancelled` so the final pass can start promptly.
     private func streamingLoop(session: Int) {
         while isStreamingActive() {
             let (samples, rate) = recorder.snapshot()
+            let spanCount = samples.count - committedEndSample
             if let t = transcriber,
-               Double(samples.count) >= minTickAudio * rate,
+               Double(spanCount) >= minTickAudio * rate,
                Double(samples.count - lastTickSampleCount) >= tickAudioInterval * rate {
                 lastTickSampleCount = samples.count
+                let maxN = Int(maxTickWindow * rate)
+                // Back up ~0.8s into committed audio: the cut then lands on stable words
+                // the decoder re-says, so the hypothesis's prefix anchors onto shown text
+                // by overlap instead of starting mid-word (which yields unmatched garbage).
+                let overlapBack = Int(0.8 * rate)
+                let windowStart = max(max(committedEndSample - overlapBack, 0),
+                                      samples.count - maxN)
+                let span = Array(samples[windowStart..<samples.count])
                 do {
-                    _ = try t.transcribe(
-                        samples: samples, sampleRate: rate, verbose: false,
-                        onPartialText: { [weak self] partial in self?.emitPartial(partial, session: session) },
+                    let hyp = try t.transcribe(
+                        samples: span, sampleRate: rate, verbose: false,
                         isCancelled: { [weak self] in !(self?.isStreamingActive() ?? false) })
+                    applyLocalAgreement(hypothesis: hyp, spanCount: span.count,
+                                        windowStart: windowStart, session: session)
                 } catch {
                     print("[stream] tick failed: \(error.localizedDescription)")
                 }
             } else {
-                Thread.sleep(forTimeInterval: 0.25)
+                Thread.sleep(forTimeInterval: 0.2)
             }
         }
     }
 
+    /// Overlap-anchored local agreement. `hypothesis` is the decode of the window
+    /// starting ~0.8s inside committed audio — so its first words usually re-say the end
+    /// of what's on screen. We find where the hypothesis's word prefix best matches a
+    /// contiguous run of `shownWords` (anywhere, not just at the tail end):
+    ///   - words before the match are older than the decode edge → committed for good;
+    ///   - the matched words confirm what they cover;
+    ///   - words after the match are new — committed only where they agree with the
+    ///     previous hypothesis's aligned tail (2-of-2 vote), keeping ≥2 revisable.
+    /// Committed text is never re-selected or rewritten — only the tail after it moves.
+    /// Anchoring by content (not an audio cursor) makes window drift harmless: an
+    /// over/under-advanced window just shifts the match position instead of duplicating
+    /// or losing words. ≥3 consecutive non-matches hard-resync the tail only.
+    private func applyLocalAgreement(hypothesis: String, spanCount: Int,
+                                     windowStart: Int, session: Int) {
+        let words = hypothesis.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !words.isEmpty else { return }
+        let wn = words.map(normalizeWord)
+
+        var k = 0, s = 0
+        if shownWords.isEmpty {
+            s = 0; k = 0                       // first decode: whole hyp is the tail
+        } else {
+            (k, s) = bestOverlap(wn, shownWords)
+            // A usable anchor: ≥2 matched words whose match reaches into the tail
+            // (a match entirely inside the committed region covers nothing new).
+            if k < 2 || s + k < committedCount {
+                alignMisses += 1
+                if alignMisses >= 3 {
+                    // Hard resync: keep committed verbatim, replace the whole tail.
+                    print("[stream] alignment resync after \(alignMisses) misses")
+                    alignMisses = 0
+                    s = committedCount; k = 0
+                } else {
+                    return
+                }
+            }
+        }
+        alignMisses = 0
+
+        // W index where the tail replacement begins: past the match, and never touching
+        // the committed region (matched words overlapping committed text are dropped so
+        // committed characters stay verbatim, even when only the normalized form agreed).
+        let tailFrom = max(k, committedCount - s)
+        // 2-of-2 vote on new tail words: W[tailFrom+i] sits at shown position
+        // s+tailFrom+i; prevTailNorm[j] sat at prevBoundary+j → j = i + (s+tailFrom-prevBoundary).
+        var extra = 0
+        if prevBoundary >= 0 {
+            let d = s + tailFrom - prevBoundary
+            while tailFrom + extra < words.count - 2 {
+                let j = extra + d
+                guard j >= 0, j < prevTailNorm.count, prevTailNorm[j] == wn[tailFrom + extra] else { break }
+                extra += 1
+            }
+        }
+
+        shownWords = Array(shownWords.prefix(s + tailFrom)) + Array(words.dropFirst(tailFrom))
+        committedCount = min(shownWords.count, max(committedCount, s + tailFrom + extra))
+        committedEndSample = max(committedEndSample,
+            windowStart + Int(Double(spanCount) * Double(tailFrom + extra) / Double(words.count)))
+        prevBoundary = s + tailFrom
+        prevTailNorm = Array(wn.dropFirst(tailFrom))
+        print("[stream] \(committedCount)w committed / \(shownWords.count) shown (match \(k)@\(s), +\(extra))")
+
+        let committed = shownWords.prefix(committedCount).joined(separator: " ")
+        emitPartial(shownWords.joined(separator: " "),
+                    keepPrefix: committed.utf16.count, session: session)
+    }
+
+    /// Best contiguous alignment of the hypothesis prefix onto shown text:
+    /// returns (match length k, start index s in shown). Prefers longest match,
+    /// then the position closest to the tail (least disruption). Normalized compare.
+    private func bestOverlap(_ wn: [String], _ shown: [String]) -> (k: Int, s: Int) {
+        let cn = shown.map(normalizeWord)
+        var best = (0, -1)
+        for start in 0..<cn.count {
+            var k = 0
+            while start + k < cn.count, k < wn.count, cn[start + k] == wn[k] { k += 1 }
+            if k > best.0 || (k == best.0 && start > best.1) { best = (k, start) }
+        }
+        return best
+    }
+
+    /// Lowercase + strip non-alphanumerics so "And," vs "and" doesn't stall agreement.
+    private func normalizeWord(_ w: String) -> String {
+        String(w.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
+    }
+
+    private func utf16CommonPrefix(_ a: String, _ b: String) -> Int {
+        var i = a.utf16.startIndex, j = b.utf16.startIndex, n = 0
+        while i != a.utf16.endIndex, j != b.utf16.endIndex, a.utf16[i] == b.utf16[j] {
+            i = a.utf16.index(after: i); j = b.utf16.index(after: j); n += 1
+        }
+        return n
+    }
+
     /// Route a cleaned partial transcript into the focused field via the AX inserter.
+    /// `keepPrefix` chars at the start are committed and left untouched.
     /// Serial-queue → main dispatch keeps emissions in order; the session check drops
     /// stragglers from an already-finished session.
-    private func emitPartial(_ text: String, session: Int) {
+    private func emitPartial(_ text: String, keepPrefix: Int = 0, session: Int) {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.sessionID == session else { return }
-            self.inserter.update(text)
+            // A tick that was mid-decode when recording stopped can dispatch its partial
+            // after the final `finish()` write — the stale text would overwrite it.
+            guard self.isStreamingActive() else { return }
+            self.inserter.update(text, keepPrefix: keepPrefix)
         }
     }
 
@@ -281,15 +420,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.transcriber == nil {
                     self.transcriber = try AlexTranscriber()   // bundled model, loaded once
                 }
+                // Single full-buffer decode — no per-token emissions during the final
+                // pass, so nothing rewrites visibly at the end.
                 let rawText = try self.transcriber!.transcribe(
-                    samples: samples, sampleRate: rate, verbose: false,
-                    onPartialText: { [weak self] partial in self?.emitPartial(partial, session: session) })
+                    samples: samples, sampleRate: rate, verbose: false)
                 // Drop the ending . and 。
                 let text = textPostProcessing(for: rawText)
+                // Reuse only what genuinely matches the committed text already shown —
+                // the final decode may re-punctuate inside the committed span.
+                let keep = utf16CommonPrefix(self.committedText, text)
                 DispatchQueue.main.async {
-                    // Final write through AX (replaces the last partial), then clipboard.
+                    // Final write through AX (replaces only the live tail), then clipboard.
                     // Clipboard is set before the fallback so a needed ⌘V pastes text.
-                    let mode = self.inserter.finish(text)
+                    let mode = self.inserter.finish(text, keepPrefix: keep)
                     let pb = NSPasteboard.general
                     pb.clearContents()
                     pb.setString(text, forType: .string)
@@ -447,7 +590,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let trusted = AXIsProcessTrustedWithOptions(opts)
         print("[tap] Accessibility trusted: \(trusted)")
         guard trusted else {
-            print("[tap] Grant Accessibility permission then restart the app")
+            // Don't leave the app half-dead: explain once, then silently arm the tap as
+            // soon as the user grants — no restart needed, and no reprompt loop.
+            let alert = NSAlert()
+            alert.messageText = "Transcribe needs Accessibility access"
+            alert.informativeText = "Grant it in System Settings → Privacy & Security → Accessibility. Once granted, the hotkey starts working automatically — no restart needed."
+            alert.addButton(withTitle: "Open Settings")
+            alert.addButton(withTitle: "Later")
+            if alert.runModal() == .alertFirstButtonReturn {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+                if AXIsProcessTrusted() {
+                    timer.invalidate()
+                    print("[tap] Accessibility granted — arming hotkey")
+                    self?.keyPressInterception()
+                }
+            }
             return
         }
 
