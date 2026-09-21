@@ -12,7 +12,12 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
 - `launchctl getenv TRANSCRIBE_TEST_PCM` should point to a raw Float32-LE 16 kHz
   mono PCM file; if unset: `launchctl setenv TRANSCRIBE_TEST_PCM /tmp/voice16k.pcm`.
   When set, the app drips that file into the recorder at real-time pace instead of
-  the mic — no audio device or mic permission needed.
+  the mic — no audio device or mic permission needed. The env var is captured at
+  process launch: after `launchctl setenv` to a different feed, `pkill` and relaunch
+  the app or the old feed (or mic path) is still used. Other feeds seen on this
+  machine: `/tmp/voice_var.pcm` (~12.4s varied speech), `/tmp/voice_long.pcm`
+  (~26.8s repeated phrase — resync stress), `/tmp/silence.pcm` (5s zeros — empty
+  transcript path).
 - App must be Accessibility-trusted (System Settings → Accessibility row) — both
   the CGEvent key tap and AX text insertion depend on it. Signing identity is
   "Devin Test Signing" so trust survives rebuilds.
