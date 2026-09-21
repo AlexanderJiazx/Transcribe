@@ -61,6 +61,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var skView: SKView?
     private var recordEmitter: SKEmitterNode?
     private var isTranscribing = false
+    private var keyTap: CFMachPort?
 
     private func initScreeninfo(){
         let screen = NSScreen.main!
@@ -462,12 +463,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             options: .defaultTap,
             eventsOfInterest: mask,
             callback: { _, type, event, refcon in
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
+                // macOS disables a tap whose callback runs long (timeout) or that the
+                // user/system disabled; without re-enabling, the next hotkey press is
+                // silently swallowed.
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let tap = delegate.keyTap {
+                        CGEvent.tapEnable(tap: tap, enable: true)
+                    }
+                    print("[tap] re-enabled after disable event \(type.rawValue)")
+                    return nil
+                }
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 print("[tap] event type: \(type.rawValue)  keyCode: \(keyCode)")
                 guard keyCode == 176 else {
                     return Unmanaged.passRetained(event)
                 }
-                let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
                 DispatchQueue.main.async {
                     delegate.Action()
                 }
@@ -479,6 +490,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        keyTap = tap   // kept for re-enable when the system disables the tap
         print("[tap] tap created successfully")
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
