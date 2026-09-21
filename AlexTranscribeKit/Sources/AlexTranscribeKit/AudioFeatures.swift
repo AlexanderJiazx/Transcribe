@@ -26,7 +26,9 @@ enum AudioError: Error, CustomStringConvertible {
 /// Detects PCM WAV by content (the sample file is a WAV with a `.mp3` extension,
 /// which Core Audio refuses to open). Falls back to AVAudioFile for real
 /// compressed formats.
-func loadAudio16kMono(url: URL) throws -> [Float] {
+///
+/// Public so tooling/tests can decode exactly what the transcriber will see.
+public func loadAudio16kMono(url: URL) throws -> [Float] {
     let data = try Data(contentsOf: url)
     if isWAV(data) {
         return try decodeWAV16kMono(data)

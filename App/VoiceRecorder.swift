@@ -14,6 +14,9 @@ final class VoiceRecorder {
     private(set) var captureSampleRate: Double = 16000
     private(set) var isRecording = false
 
+    /// Test-feed state: when set, `stop()` skips engine teardown (no mic was started).
+    private var feedTimer: DispatchSourceTimer?
+
     /// Current microphone authorization. `.notDetermined` is the only state that can still prompt.
     var permissionStatus: AVAuthorizationStatus { AVCaptureDevice.authorizationStatus(for: .audio) }
 
@@ -27,11 +30,15 @@ final class VoiceRecorder {
         }
     }
 
+    /// Read the capture so far without stopping — the streaming tick loop snapshots the
+    /// buffer this way for each intermediate transcription pass.
+    func snapshot() -> (samples: [Float], sampleRate: Double) {
+        lock.lock(); defer { lock.unlock() }
+        return (samples, captureSampleRate)
+    }
+
     /// Begin capturing. Discards any previously captured audio.
     func start() throws {
-        //Request permission using AVAudioSession
-        
-        
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
 
         let input = engine.inputNode
@@ -62,11 +69,45 @@ final class VoiceRecorder {
         isRecording = true
     }
 
+    /// Testing seam: feed pre-captured samples into the buffer at real-time pace instead
+    /// of touching the microphone, so the streaming transcription path can be exercised
+    /// on machines with no audio input device.
+    func start(testFeed feed: [Float], sampleRate: Double) {
+        lock.lock()
+        samples.removeAll(keepingCapacity: true)
+        captureSampleRate = sampleRate
+        isRecording = true
+        lock.unlock()
+
+        let chunk = max(1, Int(sampleRate * 0.1))   // drip 100 ms of audio per tick
+        var offset = 0
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
+        timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            guard self.isRecording, offset < feed.count else {
+                self.lock.unlock()
+                return
+            }
+            let end = min(offset + chunk, feed.count)
+            self.samples.append(contentsOf: feed[offset..<end])
+            offset = end
+            self.lock.unlock()
+        }
+        timer.resume()
+        feedTimer = timer
+    }
+
     /// Stop capturing and return what was recorded, with its sample rate.
     @discardableResult
     func stop() -> (samples: [Float], sampleRate: Double) {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
+        feedTimer?.cancel()
+        feedTimer = nil
+        if engine.isRunning {
+            engine.inputNode.removeTap(onBus: 0)
+            engine.stop()
+        }
         isRecording = false
         lock.lock(); let captured = samples; lock.unlock()
         return (captured, captureSampleRate)

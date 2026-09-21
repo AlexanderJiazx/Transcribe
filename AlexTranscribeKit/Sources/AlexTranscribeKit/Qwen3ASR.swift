@@ -98,13 +98,51 @@ struct Transcriber {
     }
 
     /// Transcribe from disk
-    func transcribe(audioURL: URL, maxTokens: Int = 4096, verbose: Bool = true) throws -> String {
+    func transcribe(
+        audioURL: URL,
+        maxTokens: Int = 4096,
+        verbose: Bool = true,
+        onPartialText: ((String) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
+    ) throws -> String {
         let audio = try loadAudio16kMono(url: audioURL)
-        return try transcribe(samples16k: audio, maxTokens: maxTokens, verbose: verbose)
+        return try transcribe(
+            samples16k: audio, maxTokens: maxTokens, verbose: verbose,
+            onPartialText: onPartialText, isCancelled: isCancelled)
     }
 
-    /// Transcribe in-memory
-    func transcribe(samples16k audio: [Float], maxTokens: Int = 4096, verbose: Bool = true) throws -> String {
+    /// Clean generated-token decode for presentation: drop the auto-detected
+    /// `language X<asr_text>` prefix and trim.
+    ///
+    /// Returns `nil` while the language-prefix preamble is still being generated (the
+    /// `<asr_text>` marker hasn't been emitted yet) so partial consumers never see it.
+    func cleanText(_ ids: [Int]) -> String? {
+        var text = tokenizer.decode(ids, skipSpecial: true)
+        if let r = text.range(of: "<asr_text>"), text.hasPrefix("language ") {
+            text = String(text[r.upperBound...])
+        } else if text.hasPrefix("language ") {
+            return nil   // still inside the preamble
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Transcribe in-memory.
+    ///
+    /// - Parameters:
+    ///   - onPartialText: called on this thread as decoded text grows — roughly every few
+    ///     tokens during generation. Text is the full transcription so far (already
+    ///     cleaned via ``cleanText``), not a delta. May be called fewer times than tokens
+    ///     generated, and is never called with the language preamble.
+    ///   - isCancelled: polled once per generated token; when it returns true generation
+    ///     stops early and the text decoded so far is returned. Lets callers abandon an
+    ///     in-flight pass (e.g. a superseded streaming tick) without killing the task.
+    func transcribe(
+        samples16k audio: [Float],
+        maxTokens: Int = 4096,
+        verbose: Bool = true,
+        onPartialText: ((String) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
+    ) throws -> String {
         let t0 = Date()
         if verbose { print("audio: \(audio.count) samples (\(String(format: "%.2f", Double(audio.count) / 16000))s)") }
 
@@ -134,6 +172,13 @@ struct Transcriber {
         for _ in 0..<maxTokens {
             if eosTokens.contains(token) { break }
             generated.append(token)
+            // Throttle partial emissions to ~every 4 tokens (≈ a word): per-token
+            // decode+callback is wasted work downstream coalesces anyway.
+            if let onPartialText, generated.count % 4 == 0,
+               let partial = cleanText(generated), !partial.isEmpty {
+                onPartialText(partial)
+            }
+            if isCancelled?() == true { break }
             let tokEmb = model.model.embedTokens(MLXArray([Int32(token)]).reshaped([1, 1]))
             hidden = model.model(inputsEmbeds: tokEmb, caches: caches)
             logits = model.logitsForLast(hidden)
@@ -144,12 +189,7 @@ struct Transcriber {
             print("raw ids: \(generated)")
             print("raw decode: \(tokenizer.decode(generated, skipSpecial: false))")
         }
-        var text = tokenizer.decode(generated, skipSpecial: true)
-        // strip auto-detected language prefix: "language X<asr_text>..."
-        if let r = text.range(of: "<asr_text>"), text.hasPrefix("language ") {
-            text = String(text[r.upperBound...])
-        }
-        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = cleanText(generated) ?? ""
 
         if verbose {
             let total = Date().timeIntervalSince(t0)
