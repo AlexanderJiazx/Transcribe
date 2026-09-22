@@ -169,7 +169,11 @@ struct Transcriber {
 
         var generated = [Int]()
         let tPrefill = Date()
-        for _ in 0..<maxTokens {
+        // Cap generation by audio length: non-speech input (fan/static/mic rub)
+        // never emits EOS, so an unbounded 4096-token loop freezes the overlay
+        // for minutes after stop. ~12 tokens/s of audio is ~4x real speech.
+        let durCap = max(64, Int(ceil(Double(audio.count) / 16000.0 * 12.0)))
+        for _ in 0..<min(maxTokens, durCap) {
             if eosTokens.contains(token) { break }
             generated.append(token)
             // Throttle partial emissions to ~every 4 tokens (≈ a word): per-token
