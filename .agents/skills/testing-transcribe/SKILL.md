@@ -116,6 +116,12 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
   hotkey tap afterward (verified: next dictation into TextEdit works).
 - A modal dialog stealing focus mid-dictation (e.g. ⌘S save panel) counts as a
   new writeable focus — dictation follows into the filename field by design.
+  First-launch modals ("Welcome to Freeform/Reminders", iCloud prompts) are
+  non-settable: updates drop (`focused element not text-settable`), finish
+  degrades to pasteFallback, and ⌘V goes nowhere — clipboard still complete.
+  Freeform canvas text boxes are the same shape: not AX-settable, but ⌘V
+  delivers the full transcript into the box. Reminders' new-item row DOES take
+  live AX once real focus is on the row (⌘N opens it).
 - `osascript` doc reads race `pbpaste` less than a second-old clipboard write;
   if `diff` shows doc≠clip, re-read pbpaste before suspecting corruption.
 - Model is unloaded after every transcription ("Removing transcriber"), so each
