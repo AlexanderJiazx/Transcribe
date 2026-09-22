@@ -208,7 +208,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func startRecord(){
         //Start recording
-        guard !recorder.isRecording else { return }
+        // A recorder that is still running while the UI is .hidden is always a stale
+        // ghost (e.g. a start Task that outlived a cancelled session); recover it so
+        // the hotkey can never wedge in a dead-recording state.
+        if recorder.isRecording {
+            print("[record] stale recorder active while hidden — stopping it")
+            _ = recorder.stop()
+        }
 
         //Load the model
         if transcriber == nil {
@@ -224,6 +230,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         streamLock.lock(); sessionID += 1; streamLock.unlock()
+        let session = sessionID
         // Clear the previous capture synchronously, before the Task hop below — a stop
         // press landing before the Task runs would otherwise see last session's audio.
         sessionSamples = []
@@ -232,6 +239,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // requestPermission() prompts only when status is .notDetermined; it returns
         // false outright if access was previously denied or restricted.
         Task { @MainActor in
+            // The Task can outlive a fast stop press (or a long permission prompt —
+            // the user may cancel while the dialog sits there). If the session is
+            // over, do not start the recorder: a ghost recording keeps isRecording
+            // true forever while the UI is hidden, wedging the hotkey dead — and the
+            // next startRecord() would installTap a second time (uncatchable NSException).
+            let stillCurrent = {
+                self.streamLock.lock(); defer { self.streamLock.unlock() }
+                return self.sessionID == session && self.windowState == .expanded
+            }
             // Testing seam: TRANSCRIBE_TEST_PCM=<path to raw Float32-LE 16 kHz PCM> feeds
             // that file at real-time pace instead of the microphone — exercises the whole
             // streaming path on machines without an audio input device.
@@ -239,6 +255,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 guard let feed = loadTestPCM(pcmPath) else {
                     print("[record] TRANSCRIBE_TEST_PCM set but couldn't read \(pcmPath)")
                     self.abortRecordingUI()
+                    return
+                }
+                guard stillCurrent() else {
+                    print("[record] session ended before recorder start — skipping")
                     return
                 }
                 recorder.start(testFeed: feed, sampleRate: 16000)
@@ -276,6 +296,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             print("[record] permission granted — starting engine")
+            guard stillCurrent() else {
+                print("[record] session ended while waiting for mic permission — skipping engine start")
+                return
+            }
             do {
                 try recorder.start()
                 startStreaming()
@@ -665,7 +689,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 // alignment; the final text is then the complete shown text.
                 let text: String
                 let tailCount = samples.count - self.committedEndSample
-                if self.committedEndSample > 0, tailCount > 0, self.resyncCount < 3 {
+                // tailCount <= 0 means the stream already committed the whole capture —
+                // still take the bounded tail decode (it re-checks the last ~12s) rather
+                // than paying for a full re-decode that can only confirm what's shown.
+                if self.committedEndSample > 0, self.resyncCount < 3 {
                     // Decode the uncommitted tail plus up to ~12s of already-shown
                     // audio — the window re-decode is fresher than the incremental
                     // ticks that produced that text, so it can repair recent

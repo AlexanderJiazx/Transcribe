@@ -40,6 +40,12 @@ final class VoiceRecorder {
     /// Begin capturing. Discards any previously captured audio.
     func start() throws {
         print("[rec] start() entered")
+        // installTap on a bus that already has a tap throws an ObjC NSException that
+        // Swift cannot catch — refuse a second start rather than crash/corrupt.
+        guard !isRecording else {
+            print("[rec] start() called while already recording — ignored")
+            return
+        }
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
 
         // AVAudioEngine raises ObjC NSExceptions (not Swift errors) when there is no
@@ -105,6 +111,11 @@ final class VoiceRecorder {
     /// on machines with no audio input device.
     func start(testFeed feed: [Float], sampleRate: Double) {
         lock.lock()
+        guard !isRecording else {
+            lock.unlock()
+            print("[rec] test-feed start() while already recording — ignored")
+            return
+        }
         samples.removeAll(keepingCapacity: true)
         captureSampleRate = sampleRate
         isRecording = true
