@@ -39,10 +39,38 @@ final class VoiceRecorder {
 
     /// Begin capturing. Discards any previously captured audio.
     func start() throws {
+        print("[rec] start() entered")
         lock.lock(); samples.removeAll(keepingCapacity: true); lock.unlock()
 
+        // AVAudioEngine raises ObjC NSExceptions (not Swift errors) when there is no
+        // usable input device — e.g. installTap's "format mismatch" on the phantom
+        // format a device-less machine reports. An NSException unwinds uncatchably
+        // through Swift code and, on the main runloop, is swallowed by the event
+        // handler — leaving the recording overlay stuck open with no capture. Guard
+        // before touching the engine.
+        // Discovery session covers modern devices; devices(for:) is the complete
+        // fallback so unusual input devices (Bluetooth, virtual drivers) aren't
+        // falsely reported as absent.
+        let discovered = AVCaptureDevice.DiscoverySession(
+            deviceTypes: [.microphone, .external],
+            mediaType: .audio,
+            position: .unspecified
+        ).devices
+        let inputs = discovered.isEmpty ? AVCaptureDevice.devices(for: .audio) : discovered
+        guard !inputs.isEmpty else {
+            print("[rec] no audio input devices — refusing to start engine")
+            throw NSError(domain: "VoiceRecorder", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "no audio input device"])
+        }
+
         let input = engine.inputNode
+        print("[rec] got inputNode")
         let format = input.outputFormat(forBus: 0)   // hardware rate, e.g. 44.1/48 kHz
+        print("[rec] input format \(format)")
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "VoiceRecorder", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "invalid input format \(format)"])
+        }
         captureSampleRate = format.sampleRate
 
         input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
@@ -64,8 +92,11 @@ final class VoiceRecorder {
             self.lock.lock(); self.samples.append(contentsOf: chunk); self.lock.unlock()
         }
 
+        print("[rec] tap installed")
         engine.prepare()
+        print("[rec] prepared")
         try engine.start()
+        print("[rec] engine started running=\(engine.isRunning)")
         isRecording = true
     }
 

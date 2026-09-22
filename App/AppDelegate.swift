@@ -230,6 +230,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if let pcmPath = ProcessInfo.processInfo.environment["TRANSCRIBE_TEST_PCM"] {
                 guard let feed = loadTestPCM(pcmPath) else {
                     print("[record] TRANSCRIBE_TEST_PCM set but couldn't read \(pcmPath)")
+                    self.abortRecordingUI()
                     return
                 }
                 sessionSamples = []
@@ -239,10 +240,35 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            guard await recorder.requestPermission() else {
+            // Only the .notDetermined path needs the async prompt — check status
+            // synchronously so an already-granted permission never suspends the
+            // recording start behind a cooperative-pool hop.
+            let micStatus = recorder.permissionStatus
+            print("[record] requesting mic permission (status=\(micStatus.rawValue))")
+            let granted: Bool
+            if micStatus == .notDetermined {
+                granted = await recorder.requestPermission()
+            } else {
+                granted = (micStatus == .authorized)
+            }
+            guard granted else {
                 print("[record] microphone access denied — enable it in System Settings")
+                self.abortRecordingUI()
+                // Mic denial is silent to the user otherwise — the overlay already
+                // expanded, so explain why nothing is recording.
+                let alert = NSAlert()
+                alert.messageText = "Transcribe needs Microphone access"
+                alert.informativeText = "Enable it in System Settings → Privacy & Security → Microphone, then press the hotkey again."
+                alert.addButton(withTitle: "Open Settings")
+                alert.addButton(withTitle: "Later")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
                 return
             }
+            print("[record] permission granted — starting engine")
             do {
                 sessionSamples = []             // discard any previous capture
                 try recorder.start()
@@ -250,6 +276,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 print("[record] recording started")
             } catch {
                 print("[record] couldn't start: \(error.localizedDescription)")
+                self.abortRecordingUI()
+                let alert = NSAlert()
+                alert.messageText = "Couldn't start recording"
+                alert.informativeText = "\(error.localizedDescription) — connect a microphone or check it in System Settings, then press the hotkey again."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
             }
         }
         
@@ -798,6 +830,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // Called on the main thread once transcription finishes (paste) or errors.
+    /// Collapse the recording overlay when a session never actually started
+    /// (mic denied, engine failure, missing test feed) — the press already
+    /// expanded it, so leave nothing visible and nothing recording-shaped.
+    private func abortRecordingUI() {
+        recordEmitter?.particleBirthRate = 0
+        switchWindowState(to: .hidden) { [weak self] in
+            self?.removeParticleLayer()
+        }
+    }
+
     private func finishTranscription() {
         isTranscribing = false
         recordEmitter?.particleBirthRate = 0                // stop emitting new particles
