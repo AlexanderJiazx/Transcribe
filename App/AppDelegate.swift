@@ -988,10 +988,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func tapWatchdogTick() {
-        if IsSecureEventInputEnabled() {
+        // kCGSSessionSecureInputPID in the session dictionary is the reliable
+        // signal — it names the actual holder and covers tty echo-off holds
+        // (Terminal password prompts) that IsSecureEventInputEnabled misses.
+        let holderPID = (CGSessionCopyCurrentDictionary() as? [String: Any])?["kCGSSessionSecureInputPID"] as? Int
+        if let holderPID, holderPID != ProcessInfo.processInfo.processIdentifier {
             if !secureInputActive {
                 secureInputActive = true
-                print("[tap] secure event input held by another app — hotkey hidden until released")
+                print("[tap] secure event input held by pid \(holderPID) — hotkey hidden until released")
             }
             probePending = false
             return
