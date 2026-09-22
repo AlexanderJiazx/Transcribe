@@ -470,10 +470,28 @@ public final class LiveTextInserter {
         let sys = AXUIElementCreateSystemWide()
         var ref: CFTypeRef?
         if AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &ref) == .success {
-            return (ref as! AXUIElement)
+            let el = ref as! AXUIElement
+            var pid: pid_t = 0
+            AXUIElementGetPid(el, &pid)
+            if pid != getpid() { return el }
+            // The focused element is ours — the overlay panel can hold key status
+            // briefly at launch while the user perceives another app as frontmost.
+            // Use the menu-bar owner, which tracks the user's real front app.
+            if let owner = NSWorkspace.shared.menuBarOwningApplication,
+               owner.processIdentifier != getpid() {
+                let app = AXUIElementCreateApplication(owner.processIdentifier)
+                var el2: CFTypeRef?
+                if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &el2) == .success {
+                    return (el2 as! AXUIElement)
+                }
+            }
+            return nil
         }
         if AXUIElementCopyAttributeValue(sys, kAXFocusedApplicationAttribute as CFString, &ref) == .success {
             let app = ref as! AXUIElement
+            var pid: pid_t = 0
+            AXUIElementGetPid(app, &pid)
+            if pid == getpid() { return nil }
             var el: CFTypeRef?
             if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &el) == .success {
                 return (el as! AXUIElement)
