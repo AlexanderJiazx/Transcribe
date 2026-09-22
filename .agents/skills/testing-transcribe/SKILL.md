@@ -204,6 +204,27 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
   (harmless); clipboard still holds the full transcript.
 - Notes **table cells** are invisible to the system focused-element query →
   `no focused element` → pasteFallback ⌘V lands inside the cell correctly.
+- **Never `lldb -p` a running Transcribe** — the manual codesign omits
+  `get-task-allow`, so the kernel SIGKILLs the process on debugserver attach
+  (unified log shows `task_for_pid` + `ptrace(PT_ATTACHEXC)` at the death
+  instant, no crash report). Use `sample <pid>` instead — it works without
+  Developer Tools auth. An attach attempt also spawns a hidden SecurityAgent
+  "Developer Tools Access" prompt that holds secure input and can't be clicked
+  away synthetically — answer it by typing the account password + Continue.
+- **No-input-device start**: on a Mac with zero audio input devices,
+  `engine.inputNode` returns a phantom `2ch 44100Hz` format and `installTap`
+  raises `com.apple.coreaudio.avfaudio` NSException — uncatchable in Swift,
+  **swallowed by the main-runloop handler** (HIServices FAULT in unified log),
+  leaving the Task dead mid-flight and the overlay expanded forever. Repro:
+  granted mic + unset TRANSCRIBE_TEST_PCM + press → last log is
+  `[rec] input format …`. Fixed: `start()` enumerates input devices first and
+  throws `[rec] no audio input devices` → `couldn't start` → overlay aborts +
+  alert. `[rec] …` prints are intentional start-path breadcrumbs.
+- **Mic TCC grant requires Quit & Reopen** to take effect in a running app;
+  a revoked Accessibility grant recovers live (watchdog retry re-creates the
+  tap ~10s backoff). `tccutil reset Accessibility com.alexanderjia.app.transcribe`
+  revokes mid-run for the revoke-recovery test; `AXIsProcessTrusted` reads
+  stale-true afterward — `CGEvent.tapCreate` failure is the real revoked signal.
 
 ## Devin Secrets Needed
 - None for the app test path. (Mic permission isn't needed when
