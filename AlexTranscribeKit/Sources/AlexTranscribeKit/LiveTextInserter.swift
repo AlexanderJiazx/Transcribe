@@ -112,6 +112,18 @@ public final class LiveTextInserter {
                     el = f
                 } else if let prev = element, anchorStart != nil {
                     el = prev
+                } else if let alt = menuBarOwnerElement(), !CFEqual(alt, f) {
+                    // Transient focus (notification banner, floating panel) is
+                    // not a text target — the menu-bar owner is the app the
+                    // user actually perceives as frontmost; try its field.
+                    var settable2 = DarwinBoolean(false)
+                    guard AXUIElementIsAttributeSettable(alt, kAXSelectedTextAttribute as CFString, &settable2) == .success,
+                          settable2.boolValue else {
+                        insertionSupported = false
+                        print("[insert] focused element not text-settable and no anchor — update dropped")
+                        return
+                    }
+                    el = alt
                 } else {
                     insertionSupported = false
                     print("[insert] focused element not text-settable and no anchor — update dropped")
@@ -477,15 +489,7 @@ public final class LiveTextInserter {
             // The focused element is ours — the overlay panel can hold key status
             // briefly at launch while the user perceives another app as frontmost.
             // Use the menu-bar owner, which tracks the user's real front app.
-            if let owner = NSWorkspace.shared.menuBarOwningApplication,
-               owner.processIdentifier != getpid() {
-                let app = AXUIElementCreateApplication(owner.processIdentifier)
-                var el2: CFTypeRef?
-                if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &el2) == .success {
-                    return (el2 as! AXUIElement)
-                }
-            }
-            return nil
+            return menuBarOwnerElement()
         }
         if AXUIElementCopyAttributeValue(sys, kAXFocusedApplicationAttribute as CFString, &ref) == .success {
             let app = ref as! AXUIElement
@@ -498,6 +502,17 @@ public final class LiveTextInserter {
             }
         }
         return nil
+    }
+
+    /// Focused element of the app that owns the menu bar — the user's perceived
+    /// frontmost app even when a panel or banner of ours/another app holds key.
+    private func menuBarOwnerElement() -> AXUIElement? {
+        guard let owner = NSWorkspace.shared.menuBarOwningApplication,
+              owner.processIdentifier != getpid() else { return nil }
+        let app = AXUIElementCreateApplication(owner.processIdentifier)
+        var el: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &el) == .success else { return nil }
+        return (el as! AXUIElement)
     }
 
     private func selectedRange(_ el: AXUIElement) -> CFRange? {
