@@ -186,6 +186,24 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
 - Mid-stream partials may carry raw decode spacing quirks ("Hello ,worid ! …");
   the final `inserter.finish` write replaces the whole range with the clean
   transcript — verify final text byte-for-byte, not by eyeballing partials.
+- **SIGSTOP the app mid-dictation** (`kill -STOP/-CONT <pid>`) freezes the audio
+  drip and lags `committedEndSample` → the tail decode window can cover the WHOLE
+  recording and its hyp may *insert* words the live ticks dropped. The final
+  splice must tolerate hyp-side insertions (symmetric subsequence skip) — a
+  doubled transcript like `…newest words. This is a test…` means the matcher
+  regressed (was pinned on the inserted word). Reproduced and fixed in d959e1e.
+- **Chrome omnibox** takes live AX (AXTextField settable; ⌘L selects the URL,
+  first write replaces the selection). **Chrome `contenteditable` divs**
+  (file:// test page) are invisible to the system focused-element query →
+  `no focused element` drops → pasteFallback ⌘V lands the full transcript —
+  same shape as textarea/input.
+- **Format→Make Plain Text mid-dictation** recreates the doc but TextEdit keeps
+  the same NSTextView — writes continue uninterrupted.
+- **Target app killed during final decode**: `[insert] write evaporated` →
+  `final text not delivered` → pasteFallback ⌘V lands wherever focus went
+  (harmless); clipboard still holds the full transcript.
+- Notes **table cells** are invisible to the system focused-element query →
+  `no focused element` → pasteFallback ⌘V lands inside the cell correctly.
 
 ## Devin Secrets Needed
 - None for the app test path. (Mic permission isn't needed when
