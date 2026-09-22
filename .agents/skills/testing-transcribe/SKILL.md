@@ -51,6 +51,12 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
 - **Focus switch mid-record**: AXRaise another TextEdit window mid-feed; the old
   doc keeps its frozen partial, the new doc receives the full transcript at its
   caret (`[insert] first write` appears again for the new element).
+- **Focus round-trip (A→B→A)**: each field's anchor is saved on focus-leave and
+  restored on return (`focused el … (resumed)` log); the first write back
+  rewrites the stale span wholesale (keep=0). Regression check: A must end
+  byte-equal to pbpaste — a `partial + full` doubled doc is the old bug.
+  Focus moving to a non-text surface (Finder, desktop) never changes the
+  anchor — updates continue into the already-anchored field.
 - **Hotkey spam during final decode**: presses are ignored (no `[record]`
   markers between `captured` and `copied`); the next press after `copied`
   starts a clean session.
