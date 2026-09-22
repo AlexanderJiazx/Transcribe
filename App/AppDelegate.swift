@@ -26,12 +26,11 @@ struct ScreenInfo{
 
 // The tap watchdog's liveness probe: a flagsChanged event for an option-key
 // release. It is inert in every app (a release of a modifier that was never
-// pressed), so leaking it when the tap is dead is harmless. The probe is
-// tagged with a magic value in eventSourceUserData so ONLY our own probe
-// clears probePending — an unrelated delivered event (e.g. a real modifier
-// press) must not mask a tap that has stopped delivering.
+// pressed), so leaking it when the tap is dead is harmless. Delivery of the
+// probe (or of any event at all) is what proves the tap is alive; events
+// tagged via eventSourceUserData are NOT delivered to our tap — observed in
+// testing — so the probe must remain an ordinary untagged event.
 private let tapProbeKeyCode: Int64 = 58  // left option
-private let tapProbeMagic: Int64 = 0x54524150  // 'TRAP'
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
@@ -104,6 +103,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // be recovered. We detect it and stay quiet instead of thrashing.
     private var secureInputActive = false
     private var tapTestFired = false
+    // Two consecutive missed probes are required before rebuilding — a single
+    // dropped synthetic event must not churn the tap.
+    private var probeLost = false
 
     private func initScreeninfo(){
         let screen = NSScreen.main!
@@ -661,13 +663,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             eventsOfInterest: mask,
             callback: { _, type, event, refcon in
                 let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon!).takeUnretainedValue()
-                // Only our own tagged probe proves the tap is alive; a
-                // delivered unrelated event must not mask a dead tap.
-                if type == .flagsChanged,
-                   event.getIntegerValueField(.eventSourceUserData) == tapProbeMagic {
-                    delegate.probePending = false
-                    return nil   // consume our probe — it must never reach apps
-                }
+                // Any delivered event — our probe or real input — proves the
+                // tap is alive. (Tagged probes were tried and never arrive: a
+                // nonzero eventSourceUserData prevents delivery to our tap.)
+                delegate.probePending = false
                 // macOS disables a tap whose callback runs long (timeout) or that the
                 // user/system disabled; without re-enabling, the next hotkey press is
                 // silently swallowed.
@@ -752,10 +751,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("[tap] secure input released — hotkey restored")
         }
         if probePending {
-            print("[tap] watchdog: probe lost — event tap is dead, rebuilding")
-            rebuildTap()
+            probePending = false   // retry once more before declaring dead:
+            postProbe()
+            if probeLost {
+                print("[tap] watchdog: probe lost — event tap is dead, rebuilding")
+                probeLost = false
+                rebuildTap()
+            } else {
+                probeLost = true
+            }
             return
         }
+        probeLost = false
         if let tap = keyTap {
             if !CFMachPortIsValid(tap) {
                 print("[tap] watchdog: tap port invalid — rebuilding")
@@ -767,11 +774,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
         }
+        postProbe()
+    }
+
+    private func postProbe() {
         let src = CGEventSource(stateID: .combinedSessionState)
         guard let ev = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(tapProbeKeyCode), keyDown: false) else { return }
         ev.type = .flagsChanged
         ev.flags = []
-        ev.setIntegerValueField(.eventSourceUserData, value: tapProbeMagic)
         probePending = true
         ev.post(tap: .cghidEventTap)
     }
