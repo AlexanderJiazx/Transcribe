@@ -80,6 +80,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var prevTailNorm: [String] = []   // previous hyp's tail words, normalized
     private var prevBoundary = -1             // shown-index where the previous tail began
     private var alignMisses = 0
+    /// Resyncs this session — a high count means the tick loop churned and
+    /// committed text may carry artifacts, so the final pass must be authoritative.
+    private var resyncCount = 0
 
     private var committedText: String {
         shownWords.prefix(committedCount).joined(separator: " ")
@@ -256,6 +259,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         prevTailNorm = []
         prevBoundary = -1
         alignMisses = 0
+        resyncCount = 0
         streamLock.unlock()
         transcribeQueue.async { [weak self] in self?.streamingLoop(session: session) }
     }
@@ -312,18 +316,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// over/under-advanced window just shifts the match position instead of duplicating
     /// or losing words. ≥3 consecutive non-matches hard-resync the tail only.
     private func applyLocalAgreement(hypothesis: String, spanCount: Int,
-                                     windowStart: Int, session: Int,
-                                     finalPass: Bool = false) {
+                                     windowStart: Int, session: Int) {
         let words = hypothesis.split(whereSeparator: \.isWhitespace).map(String.init)
-        if words.isEmpty {
-            // An empty decode of the uncommitted tail on the final pass means the
-            // tail audio had no speech — drop the stale revisable tail instead of
-            // freezing it into the document.
-            if finalPass, shownWords.count > committedCount {
-                shownWords = Array(shownWords.prefix(committedCount))
-            }
-            return
-        }
+        guard !words.isEmpty else { return }
         let wn = words.map(normalizeWord)
 
         var k = 0, s = 0
@@ -336,28 +331,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // (a match entirely inside the committed region covers nothing new).
             if k < 2 || s + k < committedCount {
                 alignMisses += 1
-                if finalPass || alignMisses >= 3 {
-                    // Hard resync: keep committed verbatim, replace the whole tail.
-                    // The final pass gets no second hypothesis to retry a miss with —
-                    // returning here would silently drop the last spoken words.
+                if alignMisses >= 3 {
+                    // Hard resync. The decode window may not reach back to where
+                    // the uncommitted tail began — blanket-replacing the tail would
+                    // drop shown words whose audio is outside the window. Anchor
+                    // inside the tail first so those pre-window words survive.
                     print("[stream] alignment resync after \(alignMisses) misses")
                     alignMisses = 0
                     resynced = true
-                    // The hypothesis's first words usually re-say the committed
-                    // tail, but with decode variants ("word"→"words") that defeat
-                    // the exact prefix anchor. Fuzzy-match the longest hypothesis
-                    // prefix onto the committed suffix so the repeated part is
-                    // skipped instead of appended twice.
-                    let cn = shownWords.map(normalizeWord)
-                    var matched = 0
-                    var m = min(10, committedCount, words.count - 1)
-                    while m >= 3 {
-                        var diffs = 0
-                        for i in 0..<m where cn[committedCount - m + i] != wn[i] { diffs += 1 }
-                        if diffs * 4 <= m { matched = m; break }   // ≤25% mismatch tolerated
-                        m -= 1
-                    }
-                    s = committedCount - matched; k = matched
+                    resyncCount += 1
+                    (s, k) = resyncAnchor(wn, hypCount: words.count)
                 } else {
                     return
                 }
@@ -394,6 +377,94 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let committed = shownWords.prefix(committedCount).joined(separator: " ")
         emitPartial(shownWords.joined(separator: " "),
                     keepPrefix: committed.utf16.count, session: session)
+    }
+
+    /// Final-pass reconciliation: the window re-decode covers the tail plus recent
+    /// shown audio and is fresher than the ticks that produced that text — splice
+    /// it in wholesale at its fuzzy anchor (the LATEST acceptable match, since the
+    /// window covers the end of the recording), rewriting whatever the ticks left
+    /// there — including recently committed words — instead of merely appending.
+    private func applyFinalWindow(hypothesis hyp: String) -> String {
+        let words = hyp.split(whereSeparator: \.isWhitespace).map(String.init)
+        if words.isEmpty {
+            // No speech in the covered audio — drop the stale revisable tail.
+            if shownWords.count > committedCount {
+                shownWords = Array(shownWords.prefix(committedCount))
+            }
+            return shownWords.joined(separator: " ")
+        }
+        if shownWords.isEmpty {
+            shownWords = words
+            committedCount = words.count
+            return shownWords.joined(separator: " ")
+        }
+        let wn = words.map(normalizeWord)
+        // Anchor anywhere in shown text, but never earlier than the span the
+        // window's audio could have produced (≈ one shown word per decode word).
+        // Anchoring inside the committed region is allowed — the window decode is
+        // fresher than the tick that committed those words.
+        let floor = max(0, shownWords.count - words.count - 6)
+        let anchor = spliceAnchor(wn, hypCount: words.count, floor: floor)
+        if anchor >= 0 {
+            shownWords = Array(shownWords.prefix(anchor)) + words
+        } else {
+            // No anchor — same fallback as streaming resyncs: keep committed
+            // verbatim, append the decode minus any duplicated overlap.
+            let matched = committedSuffixOverlap(wn, hypCount: words.count)
+            shownWords = Array(shownWords.prefix(committedCount)) + words.dropFirst(matched)
+        }
+        committedCount = shownWords.count
+        return shownWords.joined(separator: " ")
+    }
+
+    /// Mismatches between the normalized hypothesis prefix wn[0..L] and the
+    /// normalized shown run cn[s..s+L]; positions past the end of cn count as
+    /// mismatches.
+    private func fuzzyDiffs(_ wn: [String], _ cn: [String], _ s: Int, _ L: Int) -> Int {
+        var diffs = 0
+        for i in 0..<L where s + i >= cn.count || cn[s + i] != wn[i] { diffs += 1 }
+        return diffs
+    }
+
+    /// Fuzzy anchor of the hypothesis prefix onto shown words at positions ≥ floor:
+    /// the latest position where ≤25% of the first L (≤12) words mismatch.
+    /// "Latest" because the decode window covers the end of the recording — a
+    /// repeated phrase can anchor in several places and the real one is last.
+    private func spliceAnchor(_ wn: [String], hypCount: Int, floor: Int) -> Int {
+        let cn = shownWords.map(normalizeWord)
+        let L = min(12, hypCount)
+        guard L >= 3 else { return -1 }
+        var anchor = -1
+        var s = max(0, floor)
+        while s < cn.count {
+            if fuzzyDiffs(wn, cn, s, L) * 4 <= L { anchor = s }
+            s += 1
+        }
+        return anchor
+    }
+
+    /// How many leading hypothesis words re-say the committed suffix — used to
+    /// skip a duplicated overlap when no tail anchor exists (resync fallback).
+    private func committedSuffixOverlap(_ wn: [String], hypCount: Int) -> Int {
+        let cn = shownWords.map(normalizeWord)
+        var m = min(10, committedCount, hypCount - 1)
+        while m >= 3 {
+            if fuzzyDiffs(wn, cn, committedCount - m, m) * 4 <= m { return m }
+            m -= 1
+        }
+        return 0
+    }
+
+    /// Where a resync's hypothesis lands, as (s, k) for the shared replacement
+    /// `prefix(s + tailFrom) + words[tailFrom:]` with tailFrom = max(k, c - s).
+    /// Anchors inside the uncommitted tail when possible so shown words whose
+    /// audio predates the decode window survive; otherwise replaces from the
+    /// committed boundary minus the duplicated overlap.
+    private func resyncAnchor(_ wn: [String], hypCount: Int) -> (s: Int, k: Int) {
+        let anchor = spliceAnchor(wn, hypCount: hypCount, floor: committedCount)
+        if anchor >= 0 { return (anchor, 0) }
+        let matched = committedSuffixOverlap(wn, hypCount: hypCount)
+        return (committedCount - matched, matched)
     }
 
     /// Best contiguous alignment of the hypothesis prefix onto shown text:
@@ -482,12 +553,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 // alignment; the final text is then the complete shown text.
                 let text: String
                 let tailCount = samples.count - self.committedEndSample
-                if self.committedEndSample > 0, tailCount > 0 {
+                if self.committedEndSample > 0, tailCount > 0, self.resyncCount < 3 {
+                    // Decode the uncommitted tail plus up to ~12s of already-shown
+                    // audio — the window re-decode is fresher than the incremental
+                    // ticks that produced that text, so it can repair recent
+                    // streaming artifacts instead of freezing them. Bounded cost:
+                    // ~12s of audio worst case, vs the whole capture.
                     let overlapBack = Int(0.8 * rate)
-                    let windowStart = max(self.committedEndSample - overlapBack, 0)
+                    let windowStart = max(0,
+                        min(self.committedEndSample - overlapBack,
+                            samples.count - Int(12 * rate)))
                     let span = Array(samples[windowStart..<samples.count])
                     let hyp = try self.transcriber!.transcribe(
                         samples: span, sampleRate: rate, verbose: false)
+                    print("[transcribe] tail decode: win=\(String(format:"%.1f",Double(windowStart)/rate))s..end (\(String(format:"%.1f",Double(span.count)/rate))s), committed=\(self.committedCount)/\(self.shownWords.count)w, hyp=\"\(hyp)\"")
                     let hypEmpty = hyp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     if hypEmpty, Double(tailCount) > 2.0 * rate {
                         // >2s of uncommitted audio decoding to nothing is a decode
@@ -497,14 +576,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                             samples: samples, sampleRate: rate, verbose: false)
                         text = textPostProcessing(for: rawText)
                     } else {
-                        self.applyLocalAgreement(hypothesis: hyp, spanCount: span.count,
-                                                 windowStart: windowStart, session: session,
-                                                 finalPass: true)
-                        text = textPostProcessing(for: self.shownWords.joined(separator: " "))
+                        let joined = self.applyFinalWindow(hypothesis: hyp)
+                        text = textPostProcessing(for: joined)
                     }
                 } else {
-                    // Stream never committed (short recording / no tick ran) — the
-                    // tail IS the whole buffer, so decode it all.
+                    // Full decode: the stream never committed (short recording / no
+                    // tick ran) — or it resynced heavily, meaning committed text may
+                    // carry artifacts only an authoritative pass can repair.
+                    if self.resyncCount >= 3 {
+                        print("[transcribe] \(self.resyncCount) resyncs — full decode")
+                    }
                     let rawText = try self.transcriber!.transcribe(
                         samples: samples, sampleRate: rate, verbose: false)
                     text = textPostProcessing(for: rawText)

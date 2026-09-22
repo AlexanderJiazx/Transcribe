@@ -61,6 +61,16 @@ case "feed":
     try data.write(to: URL(fileURLWithPath: args[2]))
     print("wrote \(samples.count) samples (\(String(format: "%.1f", Double(samples.count) / 16000))s) -> \(args[2])")
 
+case "raw":
+    // Decode a raw Float32-LE 16 kHz mono PCM file (same format TRANSCRIBE_TEST_PCM uses).
+    guard args.count == 2 else { usage() }
+    let data = try Data(contentsOf: URL(fileURLWithPath: args[1]))
+    let audio = data.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+    let asr = try AlexTranscriber(modelDirectory: modelDir())
+    print("audio: \(audio.count) samples (\(String(format: "%.1f", Double(audio.count) / 16000))s)")
+    let final = try asr.transcribe(samples: audio, sampleRate: 16000, verbose: false)
+    print("FINAL(\(final.count)): \(final)")
+
 case "stream":
     guard args.count >= 2 else { usage() }
     let tickSec = args.count >= 3 ? Double(args[2]) ?? 1.8 : 1.8
