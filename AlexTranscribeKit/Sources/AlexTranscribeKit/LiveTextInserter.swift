@@ -97,6 +97,7 @@ public final class LiveTextInserter {
         insertedLen = 0
         lastInserted = ""
         appendOnly = false
+        resumedAnchor = false
     }
 
     /// Write (or revise) the cumulative transcription `text` in the focused field.
