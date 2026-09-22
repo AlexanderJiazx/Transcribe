@@ -255,3 +255,25 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
 ## Devin Secrets Needed
 - None for the app test path. (Mic permission isn't needed when
   TRANSCRIBE_TEST_PCM is set; if a TCC mic prompt appears, click "Don't Allow".)
+
+- **Terminal + vim/full-screen curses apps**: Terminal holds secure input for
+  the whole vim session (not just password prompts) — every hotkey press is
+  OS-hidden until vim/Terminal exits. Expected: press logs nothing; the app
+  prints `secure event input held by pid`. Release by quitting the holder.
+- **Noise/non-speech PCM** (`head -c N /dev/urandom > noise.pcm`): the model
+  never emits EOS → decode runs the full token budget. Post-43a3a13 the cap is
+  `ceil(seconds*12)` (≥64) — 10s noise finishes in ~10s emitting e.g. "!"×120.
+  Pre-fix it ground all 4096 tokens = minutes of frozen overlay after stop.
+- **External mutation storms**: `/tmp/storm.scpt` (25 random appends/inserts/
+  cuts), `/tmp/tailcut.scpt` (8-char tail cuts @300ms ×40), 100KB osascript
+  paste mid-dictation — the transcript must land verbatim somewhere; storm
+  remnants around it are the harness's own edits, not corruption. Two
+  dictations into one doc = two intact copies (count them before crying dup).
+- **⌘` window cycling** mid-dictation fragments across cycled docs by design:
+  each field keeps only its focus-window words; the doc frontmost at stop gets
+  the complete rewritten transcript.
+- **`AXUIElementSetMessagingTimeout` (d0093e4)**: all AX elements bounded to
+  1.5s — a hung target previously stalled the runloop long enough for macOS to
+  disable the tap and silently eat a hotkey press. Repro: `/tmp/focuswar.scpt`
+  (TextEdit↔Finder activate ping-pong @250ms ×24) during dictation; verify the
+  stop press logs `keyCode: 176`.
