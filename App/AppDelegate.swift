@@ -223,7 +223,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
 
-        sessionID += 1
+        streamLock.lock(); sessionID += 1; streamLock.unlock()
+        // Clear the previous capture synchronously, before the Task hop below — a stop
+        // press landing before the Task runs would otherwise see last session's audio.
+        sessionSamples = []
         insertQueue.async { self.inserter.begin() }    // new session: drop any tracked insertion state
 
         // requestPermission() prompts only when status is .notDetermined; it returns
@@ -238,7 +241,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.abortRecordingUI()
                     return
                 }
-                sessionSamples = []
                 recorder.start(testFeed: feed, sampleRate: 16000)
                 startStreaming()
                 print("[record] test feed started (\(feed.count) samples)")
@@ -275,7 +277,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             print("[record] permission granted — starting engine")
             do {
-                sessionSamples = []             // discard any previous capture
                 try recorder.start()
                 startStreaming()
                 print("[record] recording started")
@@ -310,8 +311,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func setStreamingActive(_ v: Bool) {
         streamLock.lock(); streamingActive = v; streamLock.unlock()
     }
-    private func isStreamingActive() -> Bool {
-        streamLock.lock(); defer { streamLock.unlock() }; return streamingActive
+    /// Session-scoped liveness. A new dictation bumps sessionID, and a previous
+    /// session's loop must retire immediately — the flag alone would let it observe
+    /// the new session's streamingActive=true and keep decoding into it (two loops
+    /// interleaved on one queue, corrupting the new session's state).
+    private func isStreamingActive(for session: Int) -> Bool {
+        streamLock.lock(); defer { streamLock.unlock() }
+        return streamingActive && sessionID == session
     }
 
     /// Kick off the partial-transcription loop on transcribeQueue. Enqueued *after* the
@@ -320,16 +326,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let session = sessionID
         streamLock.lock()
         streamingActive = true
-        lastTickSampleCount = 0
-        shownWords = []
-        committedCount = 0
-        committedEndSample = 0
-        prevTailNorm = []
-        prevBoundary = -1
-        alignMisses = 0
-        resyncCount = 0
         streamLock.unlock()
-        transcribeQueue.async { [weak self] in self?.streamingLoop(session: session) }
+        // The state reset runs on transcribeQueue so it is serialized after any
+        // still-in-flight iteration of the previous session's loop, which mutates
+        // these same fields without taking streamLock.
+        transcribeQueue.async { [weak self] in
+            guard let self else { return }
+            self.lastTickSampleCount = 0
+            self.shownWords = []
+            self.committedCount = 0
+            self.committedEndSample = 0
+            self.prevTailNorm = []
+            self.prevBoundary = -1
+            self.alignMisses = 0
+            self.resyncCount = 0
+            self.streamingLoop(session: session)
+        }
     }
 
     /// Local-agreement streaming decode. Each tick re-decodes only the audio since the
@@ -341,7 +353,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Runs on transcribeQueue until endRecord clears `streamingActive`; an in-flight
     /// pass aborts early via `isCancelled` so the final pass can start promptly.
     private func streamingLoop(session: Int) {
-        while isStreamingActive() {
+        while isStreamingActive(for: session) {
             let (samples, rate) = recorder.snapshot()
             let spanCount = samples.count - committedEndSample
             if let t = transcriber,
@@ -359,7 +371,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 do {
                     let hyp = try t.transcribe(
                         samples: span, sampleRate: rate, verbose: false,
-                        isCancelled: { [weak self] in !(self?.isStreamingActive() ?? false) })
+                        isCancelled: { [weak self] in !(self?.isStreamingActive(for: session) ?? false) })
                     applyLocalAgreement(hypothesis: hyp, spanCount: span.count,
                                         windowStart: windowStart, session: session)
                 } catch {
@@ -387,6 +399,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                      windowStart: Int, session: Int) {
         let words = hypothesis.split(whereSeparator: \.isWhitespace).map(String.init)
         guard !words.isEmpty else { return }
+        // An aborted/finished session's decode can land here while a new session is
+        // already streaming — applying it would corrupt the new session's state.
+        guard isStreamingActive(for: session) else { return }
         let wn = words.map(normalizeWord)
 
         var k = 0, s = 0
@@ -599,10 +614,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// eats hotkey presses).
     private func emitPartial(_ text: String, keepPrefix: Int = 0, session: Int) {
         insertQueue.async { [weak self] in
-            guard let self, self.sessionID == session else { return }
-            // A tick that was mid-decode when recording stopped can dispatch its partial
-            // after the final `finish()` write — the stale text would overwrite it.
-            guard self.isStreamingActive() else { return }
+            // A tick that was mid-decode when recording stopped (or a stale emission
+            // from a superseded session) must not overwrite the final `finish()` write.
+            guard let self, self.isStreamingActive(for: session) else { return }
             self.inserter.update(text, keepPrefix: keepPrefix)
         }
     }
@@ -637,7 +651,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         let samples = sessionSamples
         let rate = sessionSampleRate
-        let session = sessionID
         transcribeQueue.async { [weak self] in
             guard let self else { return }
             do {

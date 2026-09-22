@@ -180,6 +180,9 @@ final class AudioEncoder: Module {
 
         // block attention windows
         let windowAfterCnn = maxLenAfterCnn * (cfg.nWindowInfer / (cfg.nWindow * 2))
+        guard windowAfterCnn > 0 else {
+            throw AudioError.featureLengthMismatch("degenerate attention window \(windowAfterCnn)")
+        }
         var cuChunkLens = [0]
         let numFullWindows = aftercnnLen / windowAfterCnn
         for _ in 0..<numFullWindows { cuChunkLens.append(windowAfterCnn) }

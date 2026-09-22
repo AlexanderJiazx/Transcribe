@@ -28,8 +28,9 @@ import Foundation
 /// Terminal, non-text controls), updates no-op and ``finish(_:)`` reports
 /// ``DeliveryMode/pasteFallback`` so the caller can drop to a paste.
 ///
-/// Threading: call all methods from the same serial context (the app uses the main
-/// queue). AX IPC happens on the calling thread.
+/// Threading: call all methods from the same serial context (the app funnels them
+/// through a dedicated serial DispatchQueue, not main — a hung target's AX reply must
+/// never stall the main runloop where the hotkey's event tap lives).
 public final class LiveTextInserter {
 
     /// How the text reached the target field.
@@ -292,6 +293,19 @@ public final class LiveTextInserter {
             print("[insert] final text not delivered via AX (have \(lastInserted.utf16.count) of \(text.utf16.count) chars) — pasteFallback")
             return .pasteFallback
         }
+        // Bookkeeping says the final text landed — verify it's still actually in the
+        // field. An external wipe (app reload, scripted erase) after our last write
+        // leaves lastInserted == text while the document is empty.
+        if deliveredViaAX, let el = element, let start = anchorStart {
+            let inPlace = stringForRange(el, CFRange(location: start, length: lastInserted.utf16.count)) == lastInserted
+            if !inPlace {
+                let stillThere = characterCount(el).map { fieldStillContainsOurText(el, docLen: $0) } ?? false
+                if !stillThere {
+                    print("[insert] final verify: transcript missing from field — pasteFallback")
+                    return .pasteFallback
+                }
+            }
+        }
         return deliveredViaAX ? .accessibility : .pasteFallback
     }
 
@@ -530,7 +544,7 @@ public final class LiveTextInserter {
         let sys = boundTimeout(AXUIElementCreateSystemWide())
         var ref: CFTypeRef?
         if AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &ref) == .success {
-            let el = ref as! AXUIElement
+            let el = ref as! AXUIElement   // AX guarantees element type on success
             var pid: pid_t = 0
             AXUIElementGetPid(el, &pid)
             if pid != getpid() { return boundTimeout(el) }

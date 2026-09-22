@@ -34,8 +34,8 @@ final class BPETokenizer {
             let parts = line.split(separator: " ")
             if parts.count == 2 {
                 bpeRanks["\(parts[0]) \(parts[1])"] = rank
-                rank += 1
             }
+            rank += 1   // rank is line position — a skipped malformed line must not shift it
         }
 
         // special tokens from tokenizer_config.json

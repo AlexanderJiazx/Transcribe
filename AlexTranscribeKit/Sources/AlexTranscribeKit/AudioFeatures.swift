@@ -78,15 +78,17 @@ func parseWAV(_ d: Data) throws -> ([Float], Double) {
     var offset = 12
     var numChannels = 1, sampleRate = 16000, bitsPerSample = 16, audioFormat = 1
     var dataStart = -1, dataLen = 0
+    var sawFmt = false
     while offset + 8 <= d.count {
         let id = String(bytes: d[offset..<offset + 4], encoding: .ascii) ?? ""
         let size = readU32LE(d, offset + 4)
         let body = offset + 8
-        if id == "fmt " {
+        if id == "fmt ", body + 16 <= d.count {
             audioFormat = readU16LE(d, body)
             numChannels = readU16LE(d, body + 2)
             sampleRate = readU32LE(d, body + 4)
             bitsPerSample = readU16LE(d, body + 14)
+            sawFmt = true
         } else if id == "data" {
             dataStart = body
             dataLen = min(size, d.count - body)
@@ -95,6 +97,15 @@ func parseWAV(_ d: Data) throws -> ([Float], Double) {
         offset = body + size + (size & 1)  // chunks are word-aligned
     }
     guard dataStart >= 0 else { throw AudioError.decodeFailed("WAV: no data chunk") }
+    guard sawFmt, numChannels > 0, bitsPerSample > 0 else {
+        throw AudioError.decodeFailed("WAV: malformed fmt chunk")
+    }
+    // Supported: PCM int 8/16/24/32 and IEEE float 32 — anything else (A-law,
+    // µ-law, ADPCM, …) would silently decode to garbage, so fail loudly.
+    guard (audioFormat == 1 && [8, 16, 24, 32].contains(bitsPerSample))
+          || (audioFormat == 3 && bitsPerSample == 32) else {
+        throw AudioError.decodeFailed("WAV: unsupported format \(audioFormat) at \(bitsPerSample) bits")
+    }
 
     let bytesPerSample = bitsPerSample / 8
     let frameCount = dataLen / (bytesPerSample * numChannels)
@@ -105,11 +116,18 @@ func parseWAV(_ d: Data) throws -> ([Float], Double) {
             var acc: Float = 0
             for c in 0..<numChannels {
                 let p = base.advanced(by: (i * numChannels + c) * bytesPerSample)
-                if audioFormat == 3 && bitsPerSample == 32 {
+                if audioFormat == 3 {
                     acc += p.loadUnaligned(as: Float.self)
                 } else if bitsPerSample == 16 {
                     acc += Float(p.loadUnaligned(as: Int16.self)) / 32768.0
-                } else if bitsPerSample == 32 {
+                } else if bitsPerSample == 24 {
+                    let v = Int32(p.loadUnaligned(as: UInt8.self))
+                        | (Int32(p.loadUnaligned(fromByteOffset: 1, as: UInt8.self)) << 8)
+                        | (Int32(p.loadUnaligned(fromByteOffset: 2, as: UInt8.self)) << 16)
+                    acc += Float(v >= 0x800000 ? v - 0x1000000 : v) / 8388608.0
+                } else if bitsPerSample == 8 {
+                    acc += (Float(p.loadUnaligned(as: UInt8.self)) - 128.0) / 128.0
+                } else {
                     acc += Float(p.loadUnaligned(as: Int32.self)) / 2147483648.0
                 }
             }
