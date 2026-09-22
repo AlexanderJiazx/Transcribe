@@ -59,6 +59,20 @@ public final class LiveTextInserter {
     /// Element whose writes evaporated (fake-success AX writes on e.g. web text
     /// fields). Once marked, we stop attempting writes to it for this session.
     private var unwriteable: AXUIElement?
+    /// Insertion state saved per adopted element: when focus leaves a field
+    /// mid-session and comes back, we resume tracked editing of the stale span
+    /// we left there instead of appending a second copy of the transcript.
+    private struct ElementAnchor {
+        var start: Int
+        var len: Int
+        var text: String
+        var appendOnly: Bool
+    }
+    private var anchors: [(element: AXUIElement, anchor: ElementAnchor)] = []
+    /// The next tracked write must rewrite the whole anchored span: a resumed
+    /// anchor's `lastInserted` is a stale partial that may have diverged from
+    /// the current transcript since the keep-prefix region.
+    private var resumedAnchor = false
 
     /// The text currently occupying our tracked range in the field (what ``update`` last
     /// wrote). Callers use it to compute keep-prefixes that match reality — the shown
@@ -73,6 +87,8 @@ public final class LiveTextInserter {
         insertionSupported = true
         element = nil
         unwriteable = nil
+        anchors.removeAll()
+        resumedAnchor = false
         resetTracking()
     }
 
@@ -145,16 +161,33 @@ public final class LiveTextInserter {
         insertionSupported = true
 
         if element == nil || !CFEqual(element!, el) {
-            // First element seen this session, or focus moved mid-session: anchor at the
-            // new element's caret (any stale text we left in the old field stays put).
+            // Focus moved (or first element): stash the old field's anchor so a
+            // later return rewrites its stale span rather than appending a copy.
+            if let prev = element, let start = anchorStart {
+                let a = ElementAnchor(start: start, len: insertedLen, text: lastInserted, appendOnly: appendOnly)
+                if let i = anchors.firstIndex(where: { CFEqual($0.element, prev) }) {
+                    anchors[i].anchor = a
+                } else {
+                    anchors.append((prev, a))
+                }
+            }
             element = el
             resetTracking()
+            var resumed = false
+            if let a = anchors.first(where: { CFEqual($0.element, el) })?.anchor {
+                anchorStart = a.start
+                insertedLen = a.len
+                lastInserted = a.text
+                appendOnly = a.appendOnly
+                resumedAnchor = true
+                resumed = true
+            }
             var roleRef: CFTypeRef?
             AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &roleRef)
             var pid: pid_t = 0
             AXUIElementGetPid(el, &pid)
             let owner = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?"
-            print("[insert] focused el role=\(roleRef as? String ?? "?") app=\(owner)")
+            print("[insert] focused el role=\(roleRef as? String ?? "?") app=\(owner)\(resumed ? " (resumed)" : "")")
         }
 
         if appendOnly {
@@ -164,7 +197,11 @@ public final class LiveTextInserter {
 
         if let start = anchorStart {
             // Only replace the tail after the committed prefix; the prefix must never move.
-            let keep = min(keepPrefix, insertedLen, text.utf16.count)
+            // On a resumed anchor the keep region can't be trusted — the stale
+            // partial we left may diverge from `text` before keepPrefix — so the
+            // first write after a focus return rewrites the whole span.
+            let keep = resumedAnchor ? 0 : min(keepPrefix, insertedLen, text.utf16.count)
+            resumedAnchor = false
             let tracked = CFRange(location: start + keep, length: insertedLen - keep)
             let oldSuffix = String(decoding: lastInserted.utf16.dropFirst(keep), as: UTF16.self)
             let newSuffix = String(decoding: text.utf16.dropFirst(keep), as: UTF16.self)
