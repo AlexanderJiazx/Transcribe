@@ -134,7 +134,9 @@ final class AudioEncoder: Module {
                 chunkLens.append(chunkSize)
             }
         }
-        let maxChunkLen = chunkLens.max()!
+        guard let maxChunkLen = chunkLens.max() else {
+            throw AudioError.featureLengthMismatch("no feature frames (featLen=\(featLen))")
+        }
 
         // build padded chunks (numChunks, 128, maxChunkLen)
         var paddedChunks = [MLXArray]()
@@ -152,7 +154,9 @@ final class AudioEncoder: Module {
 
         // per-chunk conv output lengths and full after-cnn length
         let chunkAfterCnn = chunkLens.map { featExtractOutputLength($0) }
-        let maxLenAfterCnn = chunkAfterCnn.max()!
+        guard let maxLenAfterCnn = chunkAfterCnn.max() else {
+            throw AudioError.featureLengthMismatch("no chunk conv outputs")
+        }
         let aftercnnLen = featExtractOutputLength(featLen)
 
         // conv frontend (NHWC: N=numChunks, H=128 mel, W=time, C=1)
