@@ -277,3 +277,11 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
   disable the tap and silently eat a hotkey press. Repro: `/tmp/focuswar.scpt`
   (TextEdit↔Finder activate ping-pong @250ms ×24) during dictation; verify the
   stop press logs `keyCode: 176`.
+- **9a11154 architecture**: all LiveTextInserter calls run on a dedicated
+  `insertQueue` (serial) — never main. AX calls into a hung/churning target
+  used to stall the main runloop long enough for macOS to disable the event
+  tap; a press posted inside the stall is lost at HID level before the tap's
+  disable-notification can even fire. Verify presses land under
+  `/tmp/focuswar2.scpt` (100ms TextEdit↔Finder ping-pong ×40) — count
+  `keyCode: 176` lines vs presses sent. Clipboard write + ⌘V paste + overlay
+  UI still dispatch on main AFTER `inserter.finish` returns on insertQueue.
