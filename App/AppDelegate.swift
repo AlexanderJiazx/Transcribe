@@ -119,6 +119,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                 fringeWidth: 184)
     }
     
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Two instances would both answer the hotkey and double-transcribe —
+        // this fires for renamed copies too (Transcribe.app vs Transcribe-beta.app
+        // share the bundle id). Bail before any taps/recordings are set up.
+        let me = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(
+            withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0.processIdentifier != me }
+        if let existing = others.first {
+            print("[app] instance already running (pid \(existing.processIdentifier)) — exiting")
+            exit(0)
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         setbuf(__stdoutp, nil)   // unbuffer print() so redirected stdout shows logs live
         Task{
