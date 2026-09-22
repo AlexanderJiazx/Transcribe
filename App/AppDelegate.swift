@@ -1010,6 +1010,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // create on a backoff instead of thrashing every tick.
             probePending = false
             probeLost = false
+            if recorder.isRecording && tapCreateFailures >= 3 {
+                // The tap is the only way to stop recording — while it's dead the
+                // overlay can never be dismissed. Finish the dictation with the
+                // audio captured so far instead of trapping it in record forever.
+                print("[tap] tap dead while recording — finishing dictation with captured audio")
+                Action()
+                return
+            }
             if Date().timeIntervalSince(lastTapCreateAttempt) > 10 {
                 print("[tap] watchdog: tap absent — retrying create")
                 lastTapCreateAttempt = Date()
