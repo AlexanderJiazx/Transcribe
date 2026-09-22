@@ -225,6 +225,32 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
   tap ~10s backoff). `tccutil reset Accessibility com.alexanderjia.app.transcribe`
   revokes mid-run for the revoke-recovery test; `AXIsProcessTrusted` reads
   stale-true afterward — `CGEvent.tapCreate` failure is the real revoked signal.
+- **Revoke while recording**: tap dies, presses vanish; after 3 failed
+  tapCreates (~30s) the app auto-finishes the dictation (`[tap] tap dead while
+  recording — finishing dictation`) — the overlay can never trap a session.
+  Stale AX trust still lets the final write land; TCC.db `auth_value=2` is the
+  grant source of truth (the Settings pane re-locks and shows all toggles grey).
+- **`tccutil reset` removes the Settings row entirely** — the app must re-run
+  its prompt path (relaunch) to reappear, and MULTIPLE "Transcribe" rows can
+  coexist (one per signed path — debug build vs Transcribe-beta.app). Grant the
+  right row: `sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db
+  "SELECT client,service,auth_value FROM access WHERE service='kTCCServiceAccessibility'"`
+  (path-keyed rows show the binary path; signature-keyed rows may show a blank
+  client). A wrong-row toggle leaves the app untrusted with no visible symptom.
+- **Secure input mid-dictation** (`osascript /tmp/gp.scpt` runs a Terminal
+  getpass): AX writes keep landing; a hotkey press during the hold is hidden
+  by the OS (zero `[tap]` events); `swift /tmp/secin.swift` prints the holder
+  pid; killing the prompt → `secure input released — hotkey restored` → next
+  press works. Hold during dictation does NOT trigger the dead-tap auto-finish
+  (tap still exists — events are withheld, not failed).
+- **VoiceOver enabled**: dictation unaffected (writes + final land normally);
+  the VO checkbox press may sit behind an unlock dialog — answer password
+  `devin`; `VoiceOver Quickstart.app` splash can be killed safely.
+- **TextEdit Format→Text→Writing Direction submenus** don't hold open under
+  synthetic mouse_move — don't burn cycles; a doc containing Hebrew/RTL text
+  exercises the same bidi offset paths.
+- `osascript` doc reads can stall ~60s on busy TextEdit — always background
+  them and read the tail rather than re-issuing.
 
 ## Devin Secrets Needed
 - None for the app test path. (Mic permission isn't needed when
