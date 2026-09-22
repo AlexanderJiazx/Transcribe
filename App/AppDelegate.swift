@@ -458,11 +458,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var s = max(0, floor)
         while s < cn.count {
             if cn[s] == wn[0] {
-                var i = s, w = 0, matched = 0
+                // Greedily place each hyp word at its earliest in-order position;
+                // a hyp word absent from the shown text is skipped rather than
+                // stalling the match — the window decode can INSERT words the
+                // ticks dropped (e.g. "transcription. I" → "transcription system. I").
+                var i = s, matched = 0
                 let bound = min(cn.count, s + L + 6)
-                while w < L, i < bound {
-                    if cn[i] == wn[w] { w += 1; matched += 1 }
-                    i += 1
+                for w in 0..<L {
+                    var j = i
+                    while j < bound, cn[j] != wn[w] { j += 1 }
+                    if j < bound { matched += 1; i = j + 1 }
                 }
                 if matched * 4 >= L * 3 { anchor = s }
             }
@@ -479,10 +484,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let cn = shownWords.map(normalizeWord)
         var m = min(10, committedCount, hypCount - 1)
         while m >= 3 {
-            var i = max(0, committedCount - m - 2), w = 0, matched = 0
-            while w < m, i < committedCount {
-                if cn[i] == wn[w] { w += 1; matched += 1 }
-                i += 1
+            // Same symmetric tolerance as spliceAnchor: a hyp word missing from
+            // the committed suffix is skipped instead of stalling the scan.
+            var i = max(0, committedCount - m - 2), matched = 0
+            for w in 0..<m {
+                var j = i
+                while j < committedCount, cn[j] != wn[w] { j += 1 }
+                if j < committedCount { matched += 1; i = j + 1 }
             }
             if matched * 4 >= m * 3 { return m }
             m -= 1
