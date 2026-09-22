@@ -150,8 +150,12 @@ final class VoiceRecorder {
             engine.inputNode.removeTap(onBus: 0)
             engine.stop()
         }
+        // Clear the flag under the lock so a test-feed tick can't append after
+        // the capture reads the buffer (which would drop the tail of the feed).
+        lock.lock()
         isRecording = false
-        lock.lock(); let captured = samples; lock.unlock()
+        let captured = samples
+        lock.unlock()
         return (captured, captureSampleRate)
     }
 }
