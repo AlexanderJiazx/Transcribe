@@ -168,6 +168,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         FixedOverlaySpace.shared.adopt(window)
         window.orderFrontRegardless()
 
+        // Warm the ASR model at launch so the first dictation starts instantly.
+        transcribeQueue.async { [weak self] in
+            guard let self, self.transcriber == nil else { return }
+            do {
+                self.transcriber = try AlexTranscriber()
+                print("[record] model loaded")
+            } catch {
+                print("[record] model load failed: \(error)")
+            }
+        }
+
         keyPressInterception()
         /*
         DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
@@ -431,17 +442,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return shownWords.joined(separator: " ")
     }
 
-    /// Mismatches between the normalized hypothesis prefix wn[0..L] and the
-    /// normalized shown run cn[s..s+L]; positions past the end of cn count as
-    /// mismatches.
-    private func fuzzyDiffs(_ wn: [String], _ cn: [String], _ s: Int, _ L: Int) -> Int {
-        var diffs = 0
-        for i in 0..<L where s + i >= cn.count || cn[s + i] != wn[i] { diffs += 1 }
-        return diffs
-    }
-
     /// Fuzzy anchor of the hypothesis prefix onto shown words at positions ≥ floor:
-    /// the latest position where ≤25% of the first L (≤12) words mismatch.
+    /// the latest position where ≥75% of the first L (≤12) hypothesis words appear
+    /// as an in-order subsequence of the shown words within a bounded lookahead.
+    /// Subsequence (not fixed-offset) matching tolerates the window decode
+    /// inserting or dropping a word relative to the live ticks — a shifted run
+    /// would otherwise fail the fixed-offset diff test and double the text.
     /// "Latest" because the decode window covers the end of the recording — a
     /// repeated phrase can anchor in several places and the real one is last.
     private func spliceAnchor(_ wn: [String], hypCount: Int, floor: Int) -> Int {
@@ -451,7 +457,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var anchor = -1
         var s = max(0, floor)
         while s < cn.count {
-            if fuzzyDiffs(wn, cn, s, L) * 4 <= L { anchor = s }
+            if cn[s] == wn[0] {
+                var i = s, w = 0, matched = 0
+                let bound = min(cn.count, s + L + 6)
+                while w < L, i < bound {
+                    if cn[i] == wn[w] { w += 1; matched += 1 }
+                    i += 1
+                }
+                if matched * 4 >= L * 3 { anchor = s }
+            }
             s += 1
         }
         return anchor
@@ -459,11 +473,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// How many leading hypothesis words re-say the committed suffix — used to
     /// skip a duplicated overlap when no tail anchor exists (resync fallback).
+    /// Subsequence match over a slightly wider shown span tolerates one side
+    /// inserting a word relative to the other.
     private func committedSuffixOverlap(_ wn: [String], hypCount: Int) -> Int {
         let cn = shownWords.map(normalizeWord)
         var m = min(10, committedCount, hypCount - 1)
         while m >= 3 {
-            if fuzzyDiffs(wn, cn, committedCount - m, m) * 4 <= m { return m }
+            var i = max(0, committedCount - m - 2), w = 0, matched = 0
+            while w < m, i < committedCount {
+                if cn[i] == wn[w] { w += 1; matched += 1 }
+                i += 1
+            }
+            if matched * 4 >= m * 3 { return m }
             m -= 1
         }
         return 0
@@ -760,13 +781,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         
-        //Remove the model from memory
-        print("Removing transcriber")
-        self.transcriber = nil
-        transcribeQueue.async { [weak self] in
-                self?.transcriber = nil
-                Memory.clearCache()        // flush Metal buffer pool
-            }
+        // Keep the transcriber resident: reloading the model per dictation leaks
+        // ~15MB of MLX graph descriptors each cycle and adds load latency.
+        transcribeQueue.async {
+            Memory.clearCache()        // flush decode-time Metal buffer pool
+        }
        
     }
     //Written by Claude, I don't know how it works
