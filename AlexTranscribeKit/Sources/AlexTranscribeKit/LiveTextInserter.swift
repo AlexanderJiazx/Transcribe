@@ -172,7 +172,7 @@ public final class LiveTextInserter {
                     anchors.append((prev, a))
                 }
             }
-            element = el
+            element = boundTimeout(el)
             resetTracking()
             var resumed = false
             if let a = anchors.first(where: { CFEqual($0.element, el) })?.anchor {
@@ -517,27 +517,36 @@ public final class LiveTextInserter {
 
     // MARK: - AX primitives
 
+    /// Bound every AX round-trip to `el`. AX calls run on the main runloop; a
+    /// busy or hung target app can stall them long enough for macOS to time out
+    /// and disable our event tap — and a hotkey press posted while the tap is
+    /// disabled is silently lost. 1.5s fails fast without tripping healthy apps.
+    private func boundTimeout(_ el: AXUIElement) -> AXUIElement {
+        AXUIElementSetMessagingTimeout(el, 1.5)
+        return el
+    }
+
     private func focusedElement() -> AXUIElement? {
-        let sys = AXUIElementCreateSystemWide()
+        let sys = boundTimeout(AXUIElementCreateSystemWide())
         var ref: CFTypeRef?
         if AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &ref) == .success {
             let el = ref as! AXUIElement
             var pid: pid_t = 0
             AXUIElementGetPid(el, &pid)
-            if pid != getpid() { return el }
+            if pid != getpid() { return boundTimeout(el) }
             // The focused element is ours — the overlay panel can hold key status
             // briefly at launch while the user perceives another app as frontmost.
             // Use the menu-bar owner, which tracks the user's real front app.
             return menuBarOwnerElement()
         }
         if AXUIElementCopyAttributeValue(sys, kAXFocusedApplicationAttribute as CFString, &ref) == .success {
-            let app = ref as! AXUIElement
+            let app = boundTimeout(ref as! AXUIElement)
             var pid: pid_t = 0
             AXUIElementGetPid(app, &pid)
             if pid == getpid() { return nil }
             var el: CFTypeRef?
             if AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &el) == .success {
-                return (el as! AXUIElement)
+                return boundTimeout(el as! AXUIElement)
             }
         }
         return nil
@@ -548,10 +557,10 @@ public final class LiveTextInserter {
     private func menuBarOwnerElement() -> AXUIElement? {
         guard let owner = NSWorkspace.shared.menuBarOwningApplication,
               owner.processIdentifier != getpid() else { return nil }
-        let app = AXUIElementCreateApplication(owner.processIdentifier)
+        let app = boundTimeout(AXUIElementCreateApplication(owner.processIdentifier))
         var el: CFTypeRef?
         guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &el) == .success else { return nil }
-        return (el as! AXUIElement)
+        return boundTimeout(el as! AXUIElement)
     }
 
     private func selectedRange(_ el: AXUIElement) -> CFRange? {
