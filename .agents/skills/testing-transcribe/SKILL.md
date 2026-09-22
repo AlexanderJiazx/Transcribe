@@ -60,6 +60,13 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
 - **Hotkey spam during final decode**: presses are ignored (no `[record]`
   markers between `captured` and `copied`); the next press after `copied`
   starts a clean session.
+- **Rapid start→stop race**: a stop landing before the recorder-start Task
+  used to leave a ghost recorder (isRecording true, UI hidden, hotkey dead).
+  Now the Task re-checks session+windowState before touching the engine
+  (`[record] session ended before recorder start — skipping`) and a stale
+  recorder seen while hidden is stopped (`[record] stale recorder active
+  while hidden — stopping it`). Recorder `start()` is idempotent —
+  a second `installTap` would throw an uncatchable NSException.
 - **Silence feed** (`b'\x00'*N` PCM): transcript is empty — clipboard must NOT
   be clobbered and no ⌘V is posted (log still says `delivery=pasteFallback`).
 - **Pathological repeated audio** (concat the same phrase 3×): expect
