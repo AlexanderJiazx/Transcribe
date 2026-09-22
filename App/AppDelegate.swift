@@ -109,6 +109,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // Two consecutive missed probes are required before rebuilding — a single
     // dropped synthetic event must not churn the tap.
     private var probeLost = false
+    // tapCreate can keep failing while a grant is revoked (tccutil / the user
+    // unchecking the Accessibility row kills existing taps but AXIsProcessTrusted
+    // may still read stale-true for the running process). Back off instead of
+    // spinning on probes that can never arrive.
+    private var tapCreateFailures = 0
+    private var lastTapCreateAttempt = Date.distantPast
 
     private func initScreeninfo(){
         let screen = NSScreen.main!
@@ -808,10 +814,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
        
     }
     //Written by Claude, I don't know how it works
-    private func keyPressInterception() {
-        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+    private func keyPressInterception(silentRetry: Bool = false) {
+        let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !silentRetry] as CFDictionary
         let trusted = AXIsProcessTrustedWithOptions(opts)
         print("[tap] Accessibility trusted: \(trusted)")
+        if !trusted, silentRetry {
+            // Watchdog retry while revoked — no modal, just count it so the
+            // backoff keeps spacing attempts.
+            tapCreateFailures += 1
+            lastTapCreateAttempt = Date()
+            return
+        }
         guard trusted else {
             // Don't leave the app half-dead: explain once, then silently arm the tap as
             // soon as the user grants — no restart needed, and no reprompt loop.
@@ -878,10 +891,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             },
             userInfo: selfPtr
         ) else {
-            print("[tap] CGEvent.tapCreate failed")
+            tapCreateFailures += 1
+            lastTapCreateAttempt = Date()
+            if tapCreateFailures == 1 {
+                print("[tap] CGEvent.tapCreate failed — Accessibility grant may have been revoked; hotkey suspended, retrying periodically")
+            }
             return
         }
 
+        if tapCreateFailures > 0 {
+            print("[tap] tap restored after \(tapCreateFailures) failed attempts")
+        }
+        tapCreateFailures = 0
         keyTap = tap   // kept for re-enable when the system disables the tap
         print("[tap] tap created successfully")
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
@@ -937,6 +958,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             secureInputActive = false
             print("[tap] secure input released — hotkey restored")
         }
+        if keyTap == nil {
+            // tapCreate is failing (grant revoked or sandboxed environment) —
+            // probes can't arrive without a tap, so skip them and retry the
+            // create on a backoff instead of thrashing every tick.
+            probePending = false
+            probeLost = false
+            if Date().timeIntervalSince(lastTapCreateAttempt) > 10 {
+                print("[tap] watchdog: tap absent — retrying create")
+                lastTapCreateAttempt = Date()
+                rebuildTap()
+            }
+            return
+        }
         if probePending {
             probePending = false   // retry once more before declaring dead:
             postProbe()
@@ -983,7 +1017,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         keyTap = nil
         keyTapSource = nil
         probePending = false
-        keyPressInterception()
+        keyPressInterception(silentRetry: true)
     }
     
     private func Action(){
