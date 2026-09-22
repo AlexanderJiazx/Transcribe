@@ -46,6 +46,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcriber: AlexTranscriber?
     
     private let transcribeQueue = DispatchQueue(label: "transcribe", qos: .userInitiated)  // ← add
+    // AX work lives off the main runloop: a hung target app can stall an AX call
+    // for seconds, and a stall that long on main lets macOS time out and disable
+    // the event tap — a hotkey press inside that window is silently lost. All
+    // inserter calls funnel through this one serial queue so ordering holds.
+    private let insertQueue = DispatchQueue(label: "insert", qos: .userInitiated)
 
     // Live-transcription state. While recording, a loop on transcribeQueue repeatedly
     // re-transcribes the growing capture; each pass' partials land in the focused text
@@ -219,7 +224,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
 
         sessionID += 1
-        inserter.begin()    // new session: drop any tracked insertion state
+        insertQueue.async { self.inserter.begin() }    // new session: drop any tracked insertion state
 
         // requestPermission() prompts only when status is .notDetermined; it returns
         // false outright if access was previously denied or restricted.
@@ -588,10 +593,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// Route a cleaned partial transcript into the focused field via the AX inserter.
     /// `keepPrefix` chars at the start are committed and left untouched.
-    /// Serial-queue → main dispatch keeps emissions in order; the session check drops
-    /// stragglers from an already-finished session.
+    /// Serial-queue dispatch keeps emissions in order; the session check drops
+    /// stragglers from an already-finished session. Runs on insertQueue: AX calls
+    /// into a hung target must not stall the main runloop (the event tap dies and
+    /// eats hotkey presses).
     private func emitPartial(_ text: String, keepPrefix: Int = 0, session: Int) {
-        DispatchQueue.main.async { [weak self] in
+        insertQueue.async { [weak self] in
             guard let self, self.sessionID == session else { return }
             // A tick that was mid-decode when recording stopped can dispatch its partial
             // after the final `finish()` write — the stale text would overwrite it.
@@ -682,7 +689,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         samples: samples, sampleRate: rate, verbose: false)
                     text = textPostProcessing(for: rawText)
                 }
-                DispatchQueue.main.async {
+                self.insertQueue.async {
                     // Rewrite everything from the first divergence between what's in
                     // the field and the final decode — committed text that disagrees
                     // with the final transcript must not stay frozen in the document.
@@ -692,22 +699,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     // Final write through AX (replaces only the divergent tail), then clipboard.
                     // Clipboard is set before the fallback so a needed ⌘V pastes text.
                     let mode = self.inserter.finish(text, keepPrefix: keep)
-                    // An empty transcript (silence/accidental tap) must not clobber
-                    // the user's clipboard, and a ⌘V fallback would paste stale text.
-                    if !text.isEmpty {
-                        let pb = NSPasteboard.general
-                        pb.clearContents()
-                        pb.setString(text, forType: .string)
-                    }
-                    print("[transcribe] copied \(text.count) chars to clipboard; delivery=\(mode)")
+                    DispatchQueue.main.async {
+                        // An empty transcript (silence/accidental tap) must not clobber
+                        // the user's clipboard, and a ⌘V fallback would paste stale text.
+                        if !text.isEmpty {
+                            let pb = NSPasteboard.general
+                            pb.clearContents()
+                            pb.setString(text, forType: .string)
+                        }
+                        print("[transcribe] copied \(text.count) chars to clipboard; delivery=\(mode)")
 
-                    if mode == .pasteFallback, !text.isEmpty {
-                        // The focused field refused AX writes — fall back to ⌘V paste of
-                        // the clipboard we just set (the old delivery mechanism).
-                        LiveTextInserter.pasteClipboard()
-                    }
+                        if mode == .pasteFallback, !text.isEmpty {
+                            // The focused field refused AX writes — fall back to ⌘V paste of
+                            // the clipboard we just set (the old delivery mechanism).
+                            LiveTextInserter.pasteClipboard()
+                        }
 
-                    self.finishTranscription()      // stop particles + slide window up
+                        self.finishTranscription()      // stop particles + slide window up
+                    }
                 }
             } catch {
                 print("[transcribe] error: \(error.localizedDescription)")
