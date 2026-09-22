@@ -83,10 +83,41 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
   caret even when the doc is scrolled so the caret is off-screen.
 
 ## Gotchas observed
-- The CGEvent tap can be disabled by timeout — log shows `event type:
-  4294967294 keyCode: 0` (kCGEventTapDisabledByTimeout) and the posted hotkey is
-  silently dropped. The callback doesn't re-enable the tap. Just re-post the
-  hotkey via TTA.app — in practice the tap recovers and the retry lands.
+- The CGEvent tap can be disabled by timeout (`event type: 4294967294` in the
+  log = kCGEventTapDisabledByTimeout) or silently die (zero events delivered,
+  no error). The callback re-enables on disable events, and a 1.5s watchdog
+  posts a flagsChanged probe (keyCode 58, option-release — inert if leaked)
+  through the tap; if no event is delivered between ticks the tap is rebuilt
+  (`CFMachPortInvalidate` + recreate). Test args: `--tap-disable-test` forces
+  `CGEvent.tapEnable(false)` at +4s, `--tap-kill-test` invalidates the port at
+  +4s (both fire once per process lifetime).
+- `AXUIElementIsAttributeSettable` on the focused element can transiently FAIL
+  while the target app's AX server is busy — the inserter therefore only checks
+  settability when adopting an element, and writes to the adopted anchor
+  without re-checking. Before this fix, a mid-stream flake froze the document
+  at a partial transcript (236/697 chars on the 57s feed) with zero errors.
+- Two-step tracked writes (`AXSelectedTextRange` then `AXSelectedText`) can
+  race: the selection may apply asynchronously and the text write lands as an
+  append at a stale caret — duplicating tail fragments. The inserter now
+  confirms the selection (`selectionIs`) before writing and post-verifies the
+  doc-length delta + content; a misplaced write is repaired by deleting the
+  stray tail copy and rewriting the span.
+- `finish()` reports pasteFallback when `lastInserted` lags the final text —
+  the caller pastes the complete transcript rather than leaving a truncated
+  document. Check /tmp/app.out for `[insert] final text not delivered`.
+- ⌘Z mid-dictation undoes tracked writes one step at a time; the field can be
+  left holding an earlier revision. appendDelta detects the stale span (long
+  shared prefix with current text, but not `hasPrefix(lastInserted)`) and
+  rewrites it — verified byte-clean after a double-⌘Z.
+- Secure event input (password field focused): the field is invisible to AX or
+  non-settable → updates drop (`[insert] focused element not text-settable`),
+  pasteFallback's synthetic ⌘V is dropped by secure input — correct: nothing
+  lands, transcript stays on the clipboard. Secure input does NOT wedge the
+  hotkey tap afterward (verified: next dictation into TextEdit works).
+- A modal dialog stealing focus mid-dictation (e.g. ⌘S save panel) counts as a
+  new writeable focus — dictation follows into the filename field by design.
+- `osascript` doc reads race `pbpaste` less than a second-old clipboard write;
+  if `diff` shows doc≠clip, re-read pbpaste before suspecting corruption.
 - Model is unloaded after every transcription ("Removing transcriber"), so each
   record→stop cycle pays the full model-load cost before the first tick — with an
   ~9 s feed the first tick may only run near/after feed end, so mid-recording
