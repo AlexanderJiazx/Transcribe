@@ -487,6 +487,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if matched * 4 >= m * 3 { return m }
             m -= 1
         }
+        // 1-2 leading words: only an exact contiguous suffix match counts —
+        // a subsequence check this small false-positives on common words, but
+        // the tail decode re-covers ~0.8s of committed audio, so its first
+        // word(s) legitimately re-say the committed suffix.
+        m = min(2, committedCount, hypCount - 1)
+        while m > 0 {
+            var ok = true
+            for j in 0..<m where cn[committedCount - m + j] != wn[j] { ok = false }
+            if ok { return m }
+            m -= 1
+        }
         return 0
     }
 
