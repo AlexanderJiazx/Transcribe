@@ -149,10 +149,28 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
   verify against /tmp/voice_mega.pcm = 697 chars).
 - **Single instance**: a second app copy exits(0) at launch (`another instance
   running — exiting`); old betas left running will not double-transcribe.
-- Feed files on this machine: /tmp/voice_var.pcm (12.4s), /tmp/voice_mega.pcm
-  (57.3s, 697 chars authoritative), /tmp/voice_huge.pcm (172s, 1862 chars),
-  /tmp/zh.pcm (Chinese, 45 chars), /tmp/gap.pcm (~30s, speech-gap-speech),
-  /tmp/silence.pcm.
+- Feed files on this machine: /tmp/voice_var.pcm (12.4s, 202 chars),
+  /tmp/voice_mega.pcm (57.3s, 697 chars authoritative), /tmp/voice_huge.pcm
+  (172s, 1862 chars), /tmp/zh.pcm (Chinese, 45 chars), /tmp/gap.pcm (~30s,
+  speech-gap-speech), /tmp/silence.pcm, /tmp/nums.pcm (10.5s numbers/dates,
+  178 chars), /tmp/sparse.pcm (29.6s — 0.55s speech / 0.75s silence bursts;
+  drives ≥3 resyncs → exercises the full-decode backstop), /tmp/quiet.pcm and
+  /tmp/loud.pcm (var at 5%/8× amplitude — both decode identical to var).
+- **Xcode source editor** takes live AX dictation (AXTextArea, settable) —
+  verified end-to-end. **App Store search field** takes live AX too (reads
+  via AXValue; System Events can't find it in the flat hierarchy — verify by
+  Home-key scrollback in the field). **Prepend at caret 0** works.
+- **Reminders ⌘N title field** takes live AX, but during Reminders'
+  cold-start its shared field editor can silently rebind to a NEW item when
+  the title commits — our writes keep landing via the same AX element so
+  post-verify reads the rebound doc, and the stale item keeps whatever it
+  had (observed once: an item holding transcript+transcript). Undetectable
+  from the inserter; treat as an app quirk, not a code bug.
+- Beta packaging: adhoc (`codesign -s -`) changes the cdhash every build →
+  TCC re-prompts Accessibility/Mic each release. Sign betas with
+  "Devin Test Signing" instead so grants persist across versions.
+- `[insert] write @<loc>+<len> keep=<k> newLen=<n> docLen=<d>` logs every
+  tracked write — use it to reconstruct exactly what landed where.
 - The ASR model is loaded once at launch on transcribeQueue and stays resident
   across dictations (reloading per session leaked ~15 MB of MLX descriptors and
   added load latency). `[record] model loaded` appears shortly after launch; the

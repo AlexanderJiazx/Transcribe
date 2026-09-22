@@ -981,7 +981,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func Action(){
         switch windowState {
         case .expanded:
-            guard !isTranscribing else { return }       // ignore key presses while transcribing
+            guard !isTranscribing else {
+                // Final decode still running — pressing now looks like a dead hotkey.
+                print("[record] hotkey ignored — final decode in progress")
+                return
+            }
             endRecord()
             isTranscribing = true
             transitionParticlesToWhite()                // green → white, window stays visible

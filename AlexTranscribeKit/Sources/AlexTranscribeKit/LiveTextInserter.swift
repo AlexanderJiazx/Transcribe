@@ -188,7 +188,7 @@ public final class LiveTextInserter {
             var pid: pid_t = 0
             AXUIElementGetPid(el, &pid)
             let owner = NSRunningApplication(processIdentifier: pid)?.localizedName ?? "?"
-            print("[insert] focused el role=\(roleRef as? String ?? "?") app=\(owner)\(resumed ? " (resumed)" : "")")
+            print("[insert] focused el role=\(roleRef as? String ?? "?") app=\(owner)\(resumed ? " (resumed)" : "") docLen=\(characterCount(el) ?? -1)")
         }
 
         if appendOnly {
@@ -207,6 +207,7 @@ public final class LiveTextInserter {
             let oldSuffix = String(decoding: lastInserted.utf16.dropFirst(keep), as: UTF16.self)
             let newSuffix = String(decoding: text.utf16.dropFirst(keep), as: UTF16.self)
             let docLenBefore = characterCount(el)
+            print("[insert] write @\(tracked.location)+\(tracked.length) keep=\(keep) newLen=\(newSuffix.utf16.count) docLen=\(docLenBefore ?? -1)")
             if stringForRange(el, tracked) == oldSuffix,
                setSelectedRange(el, tracked),
                selectionIs(el, tracked),
