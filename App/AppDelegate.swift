@@ -312,9 +312,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// over/under-advanced window just shifts the match position instead of duplicating
     /// or losing words. ≥3 consecutive non-matches hard-resync the tail only.
     private func applyLocalAgreement(hypothesis: String, spanCount: Int,
-                                     windowStart: Int, session: Int) {
+                                     windowStart: Int, session: Int,
+                                     finalPass: Bool = false) {
         let words = hypothesis.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard !words.isEmpty else { return }
+        if words.isEmpty {
+            // An empty decode of the uncommitted tail on the final pass means the
+            // tail audio had no speech — drop the stale revisable tail instead of
+            // freezing it into the document.
+            if finalPass, shownWords.count > committedCount {
+                shownWords = Array(shownWords.prefix(committedCount))
+            }
+            return
+        }
         let wn = words.map(normalizeWord)
 
         var k = 0, s = 0
@@ -327,12 +336,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // (a match entirely inside the committed region covers nothing new).
             if k < 2 || s + k < committedCount {
                 alignMisses += 1
-                if alignMisses >= 3 {
+                if finalPass || alignMisses >= 3 {
                     // Hard resync: keep committed verbatim, replace the whole tail.
+                    // The final pass gets no second hypothesis to retry a miss with —
+                    // returning here would silently drop the last spoken words.
                     print("[stream] alignment resync after \(alignMisses) misses")
                     alignMisses = 0
-                    s = committedCount; k = 0
                     resynced = true
+                    // The hypothesis's first words usually re-say the committed
+                    // tail, but with decode variants ("word"→"words") that defeat
+                    // the exact prefix anchor. Fuzzy-match the longest hypothesis
+                    // prefix onto the committed suffix so the repeated part is
+                    // skipped instead of appended twice.
+                    let cn = shownWords.map(normalizeWord)
+                    var matched = 0
+                    var m = min(10, committedCount, words.count - 1)
+                    while m >= 3 {
+                        var diffs = 0
+                        for i in 0..<m where cn[committedCount - m + i] != wn[i] { diffs += 1 }
+                        if diffs * 4 <= m { matched = m; break }   // ≤25% mismatch tolerated
+                        m -= 1
+                    }
+                    s = committedCount - matched; k = matched
                 } else {
                     return
                 }
@@ -463,9 +488,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     let span = Array(samples[windowStart..<samples.count])
                     let hyp = try self.transcriber!.transcribe(
                         samples: span, sampleRate: rate, verbose: false)
-                    self.applyLocalAgreement(hypothesis: hyp, spanCount: span.count,
-                                             windowStart: windowStart, session: session)
-                    text = textPostProcessing(for: self.shownWords.joined(separator: " "))
+                    let hypEmpty = hyp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    if hypEmpty, Double(tailCount) > 2.0 * rate {
+                        // >2s of uncommitted audio decoding to nothing is a decode
+                        // failure, not silence — pay for the authoritative pass.
+                        print("[transcribe] tail decode empty over \(Double(tailCount)/rate)s — full decode")
+                        let rawText = try self.transcriber!.transcribe(
+                            samples: samples, sampleRate: rate, verbose: false)
+                        text = textPostProcessing(for: rawText)
+                    } else {
+                        self.applyLocalAgreement(hypothesis: hyp, spanCount: span.count,
+                                                 windowStart: windowStart, session: session,
+                                                 finalPass: true)
+                        text = textPostProcessing(for: self.shownWords.joined(separator: " "))
+                    }
                 } else {
                     // Stream never committed (short recording / no tick ran) — the
                     // tail IS the whole buffer, so decode it all.
