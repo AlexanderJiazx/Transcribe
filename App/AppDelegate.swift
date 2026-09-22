@@ -449,12 +449,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 if self.transcriber == nil {
                     self.transcriber = try AlexTranscriber()   // bundled model, loaded once
                 }
-                // Single full-buffer decode — no per-token emissions during the final
-                // pass, so nothing rewrites visibly at the end.
-                let rawText = try self.transcriber!.transcribe(
-                    samples: samples, sampleRate: rate, verbose: false)
-                // Drop the ending . and 。
-                let text = textPostProcessing(for: rawText)
+                // A full re-decode of the whole capture made the post-stop wait
+                // scale with dictation length (a ~3min recording sat decoding for
+                // minutes). The stream already committed most words — decode only
+                // the uncommitted tail (from committedEndSample, with the same
+                // 0.8s overlap the ticks use) and reconcile it through the same
+                // alignment; the final text is then the complete shown text.
+                let text: String
+                let tailCount = samples.count - self.committedEndSample
+                if self.committedEndSample > 0, tailCount > 0 {
+                    let overlapBack = Int(0.8 * rate)
+                    let windowStart = max(self.committedEndSample - overlapBack, 0)
+                    let span = Array(samples[windowStart..<samples.count])
+                    let hyp = try self.transcriber!.transcribe(
+                        samples: span, sampleRate: rate, verbose: false)
+                    self.applyLocalAgreement(hypothesis: hyp, spanCount: span.count,
+                                             windowStart: windowStart, session: session)
+                    text = textPostProcessing(for: self.shownWords.joined(separator: " "))
+                } else {
+                    // Stream never committed (short recording / no tick ran) — the
+                    // tail IS the whole buffer, so decode it all.
+                    let rawText = try self.transcriber!.transcribe(
+                        samples: samples, sampleRate: rate, verbose: false)
+                    text = textPostProcessing(for: rawText)
+                }
                 DispatchQueue.main.async {
                     // Rewrite everything from the first divergence between what's in
                     // the field and the final decode — committed text that disagrees
