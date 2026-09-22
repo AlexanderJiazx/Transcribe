@@ -124,11 +124,33 @@ description: How to drive and verify end-to-end tests of the Transcribe macOS di
   live AX once real focus is on the row (⌘N opens it).
 - `osascript` doc reads race `pbpaste` less than a second-old clipboard write;
   if `diff` shows doc≠clip, re-read pbpaste before suspecting corruption.
-- Model is unloaded after every transcription ("Removing transcriber"), so each
-  record→stop cycle pays the full model-load cost before the first tick — with an
-  ~9 s feed the first tick may only run near/after feed end, so mid-recording
-  partials may appear late and as few revisions (not the "Hello" → "Hello, world"
-  multi-step progression a warm model would show).
+- **Own-overlay focus**: at launch our fringe NSPanel can hold key status, so the
+  system focused element can be OURS — the inserter filters by pid and uses the
+  menu-bar-owning app's focused element instead (`menuBarOwnerElement`). Same
+  fallback on transient non-text focus (banners). Log: `[insert] focused el is
+  ours` / `using menu-bar owner's focused el`.
+- **Secure input lifecycle**: while another app holds Secure Event Input
+  (Terminal Secure Keyboard Entry, password fields), key events are hidden —
+  the tap looks dead but isn't. Watchdog logs `secure event input held by
+  another app — hotkey hidden until released` then `secure input released —
+  hotkey restored`. Presses during the window are unrecoverable by design.
+- **Final pass**: `resyncCount ≥ 3` → full decode of the whole buffer
+  (authoritative, ~40s on a 172s feed); otherwise a bounded tail decode +
+  `applyFinalWindow` splice. Watch `[stream] N resyncs — full decode` and
+  `[stream] final pass: tail decode`. After a session that resynced, the doc
+  must still end byte-equal to pbpaste — a doubled transcript means
+  `spliceAnchor`/`committedSuffixOverlap` regressed (both are subsequence-based;
+  verify against /tmp/voice_mega.pcm = 697 chars).
+- **Single instance**: a second app copy exits(0) at launch (`another instance
+  running — exiting`); old betas left running will not double-transcribe.
+- Feed files on this machine: /tmp/voice_var.pcm (12.4s), /tmp/voice_mega.pcm
+  (57.3s, 697 chars authoritative), /tmp/voice_huge.pcm (172s, 1862 chars),
+  /tmp/zh.pcm (Chinese, 45 chars), /tmp/gap.pcm (~30s, speech-gap-speech),
+  /tmp/silence.pcm.
+- The ASR model is loaded once at launch on transcribeQueue and stays resident
+  across dictations (reloading per session leaked ~15 MB of MLX descriptors and
+  added load latency). `[record] model loaded` appears shortly after launch; the
+  first dictation is still tick-gated by available audio, not model load.
 - osascript can be slow/blocked on first automation use against TextEdit; it did
   eventually succeed. Reading the doc's text via
   `osascript -e 'tell application "TextEdit" to get text of document "Untitled N"'`
