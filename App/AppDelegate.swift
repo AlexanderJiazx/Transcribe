@@ -554,7 +554,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             // No anchor — keep committed verbatim and append the decode tail
             // identified by coverage (how much of the decode re-says committed).
-            let matched = decodeCoverage(wn)
+            let matched = decodeWindowCoverage(wn)
             shownWords = Array(shownWords.prefix(committedCount)) + words.dropFirst(matched)
         }
         committedCount = shownWords.count
@@ -583,6 +583,32 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         return cov
+    }
+
+    /// Coverage for a bounded-window decode whose start can land inside committed
+    /// text: only a committed SUFFIX can appear in such a decode — early committed
+    /// words predate the window and are absent from it. Matching the whole prefix
+    /// either finds nothing (cov 0 → the overlap re-appends, duplicating text) or
+    /// skips ahead to a repeated phrase later in the decode (consuming the real
+    /// tail → the last spoken words get dropped — reproduced on a >12s dictation).
+    /// Finds the longest committed suffix the decode replays from its start as an
+    /// in-order subsequence, and returns the decode index right after it.
+    private func decodeWindowCoverage(_ wn: [String]) -> Int {
+        guard committedCount > 0, !wn.isEmpty else { return 0 }
+        let cn = shownWords.prefix(committedCount).map(normalizeWord)
+        var k = min(cn.count, wn.count)
+        while k > 0 {
+            var i = 0, matched = true
+            for w in (cn.count - k)..<cn.count {
+                var j = i
+                while j < wn.count, wn[j] != cn[w] { j += 1 }
+                if j == wn.count { matched = false; break }
+                i = j + 1
+            }
+            if matched { return i }
+            k -= 1
+        }
+        return 0
     }
 
     /// Fuzzy anchor of the hypothesis prefix onto shown words at positions ≥ floor:
