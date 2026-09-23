@@ -190,10 +190,9 @@ public final class ChunkInserter {
     }
 
     private func restore() {
-        guard !savedItems.isEmpty else { return }
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.writeObjects(savedItems)
+        if !savedItems.isEmpty { pb.writeObjects(savedItems) }
     }
 
     /// Read the focused element's caret surroundings — ONE bounded AX exchange,
