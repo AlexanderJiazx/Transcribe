@@ -16,7 +16,7 @@ enum AlexTranscribeMain {
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
-        app.setActivationPolicy(.accessory)   // show in Dock, allow activation
+        app.setActivationPolicy(.accessory)   // menu-bar app: no Dock icon, no menu bar
         app.run()
     }
 }

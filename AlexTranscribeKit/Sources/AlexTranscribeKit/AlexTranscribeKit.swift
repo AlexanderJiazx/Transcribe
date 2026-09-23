@@ -45,18 +45,38 @@ public final class AlexTranscriber {
     ///   - audioURL: the audio file to transcribe.
     ///   - maxTokens: cap on generated tokens.
     ///   - verbose: when true, prints progress to stdout (off by default).
+    ///   - onPartialText: called on the caller's thread with the cleaned transcription
+    ///     so far as tokens are generated (for live display/insertion).
+    ///   - isCancelled: polled per token; return true to stop generation early and get
+    ///     back the text decoded so far.
     /// - Returns: the transcribed text.
-    public func transcribe(audioURL: URL, maxTokens: Int = 4096, verbose: Bool = false) throws -> String {
-        try transcriber.transcribe(audioURL: audioURL, maxTokens: maxTokens, verbose: verbose)
+    public func transcribe(
+        audioURL: URL,
+        maxTokens: Int = 4096,
+        verbose: Bool = false,
+        onPartialText: ((String) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
+    ) throws -> String {
+        try transcriber.transcribe(
+            audioURL: audioURL, maxTokens: maxTokens, verbose: verbose,
+            onPartialText: onPartialText, isCancelled: isCancelled)
     }
 
     /// Transcribe encoded audio bytes held in memory (wav/mp3/m4a/…) — no file needed.
     ///
     /// PCM WAV is decoded entirely in memory; other formats are briefly spilled to a temp
     /// file because AVFoundation's decoders require one.
-    public func transcribe(audioData: Data, maxTokens: Int = 4096, verbose: Bool = false) throws -> String {
+    public func transcribe(
+        audioData: Data,
+        maxTokens: Int = 4096,
+        verbose: Bool = false,
+        onPartialText: ((String) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
+    ) throws -> String {
         let samples = try loadAudio16kMono(data: audioData)
-        return try transcriber.transcribe(samples16k: samples, maxTokens: maxTokens, verbose: verbose)
+        return try transcriber.transcribe(
+            samples16k: samples, maxTokens: maxTokens, verbose: verbose,
+            onPartialText: onPartialText, isCancelled: isCancelled)
     }
 
     /// Transcribe raw mono PCM samples held in memory. Resampled to 16 kHz if needed.
@@ -65,10 +85,14 @@ public final class AlexTranscriber {
         samples: [Float],
         sampleRate: Double = 16000,
         maxTokens: Int = 4096,
-        verbose: Bool = false
+        verbose: Bool = false,
+        onPartialText: ((String) -> Void)? = nil,
+        isCancelled: (() -> Bool)? = nil
     ) throws -> String {
         let s = samples16kMono(samples, sampleRate: sampleRate)
-        return try transcriber.transcribe(samples16k: s, maxTokens: maxTokens, verbose: verbose)
+        return try transcriber.transcribe(
+            samples16k: s, maxTokens: maxTokens, verbose: verbose,
+            onPartialText: onPartialText, isCancelled: isCancelled)
     }
 }
 

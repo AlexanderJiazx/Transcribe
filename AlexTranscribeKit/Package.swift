@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .library(name: "AlexTranscribeKit", targets: ["AlexTranscribeKit"]),
         .executable(name: "alex-transcribe", targets: ["AlexTranscribeCLI"]),
+        .executable(name: "transcribe-test", targets: ["AlexTranscribeTestTool"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.4")
@@ -26,6 +27,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "AlexTranscribeCLI",
+            dependencies: ["AlexTranscribeKit"]
+        ),
+        .executableTarget(
+            name: "AlexTranscribeTestTool",
             dependencies: ["AlexTranscribeKit"]
         ),
     ]

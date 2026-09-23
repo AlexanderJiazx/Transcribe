@@ -4,7 +4,5 @@
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Microphone is needed for transcription</string>
-	<key></key>
-	<string></string>
 </dict>
 </plist>

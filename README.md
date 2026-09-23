@@ -8,10 +8,13 @@ reimplemented in Swift.
 ## Layout
 
 - **`AlexTranscribeKit/`** — a SwiftPM package containing all the work:
-  - library product `AlexTranscribeKit` (the model + a public `AlexTranscriber` API)
-  - executable product `alex-transcribe` (CLI)
-- **`AlexTranscribeApp.xcodeproj` + `App/`** — a no-op macOS app that links the kit so the
-  transcription function is callable from an app. The app does nothing on screen.
+  - library product `AlexTranscribeKit` (the model + a public `AlexTranscriber` API,
+    `LiveTextInserter` for live AX insertion)
+  - executable products `alex-transcribe` (CLI) and `transcribe-test` (test harness)
+- **`Transcribe.xcodeproj` + `App/`** — the dictation overlay app: a global hotkey
+  (dictation key, keyCode 176) toggles recording, which now transcribes **while you
+  speak** and types the partial transcript straight into the focused field via the
+  Accessibility API.
 
 ## What's implemented
 
@@ -26,9 +29,43 @@ All in `AlexTranscribeKit/Sources/AlexTranscribeKit/`:
 | Audio encoder: Conv2d frontend, chunking, sinusoidal pos-emb, 24 transformer layers w/ block attention, proj head | `AudioEncoder.swift` |
 | Qwen3 text decoder: 8-bit quantized linears/embedding, RMSNorm, Q/K-norm, GQA, RoPE, KV cache, tied LM head | `TextDecoder.swift` |
 | Weight load/quantize, audio-embed splice, greedy generation | `Qwen3ASR.swift` |
+| Live insertion into the focused text field via `AXSelectedText` | `LiveTextInserter.swift` |
 
 The audio tower runs in full precision; the text decoder + token embedding are 8-bit
 affine-quantized (group size 64), matching the checkpoint layout.
+
+## Real-time transcription + live insertion
+
+The app no longer waits for "recording complete" to transcribe. While recording, a loop
+on `transcribeQueue` re-runs the model over the growing capture every
+`tickAudioInterval` (≈1.8 s) of new audio; `AlexTranscriber.transcribe` streams its
+partial text out through `onPartialText` (emitted every few decoded tokens) and each
+emission is written into the focused field immediately.
+
+Insertion uses `LiveTextInserter` (`App` calls `inserter.update(partial)` per emission):
+
+- First update anchors at the focused element's caret (`AXSelectedTextRange`) and writes
+  via `AXSelectedText`.
+- Later updates re-select the previously written range and replace it with the newer
+  cumulative text, so mid-stream revisions are corrected in place.
+- Before each replace the tracked range is read back (`AXStringForRange`); if the user
+  edited inside our text, the inserter degrades to append-only diffs at the caret instead
+  of clobbering it.
+- If the focused element doesn't expose a settable `AXSelectedText` (secure fields,
+  Terminal…), `finish(_:)` reports `.pasteFallback` — the app copies the transcript to
+  the clipboard and posts a single ⌘V, matching the old behaviour.
+
+The final transcript is always copied to `NSPasteboard.general` on stop, regardless of
+which delivery path ran.
+
+Two requirements for the AX path on a machine:
+
+- **Accessibility permission** for the app (System Settings → Privacy & Security →
+  Accessibility). The app already needs it for the global hotkey tap, so no extra grant.
+- **An app context**: AX element queries return `kAXErrorAPIDisabled` from a bare
+  process even when trusted — the AX connection only works once `NSApplication` (or the
+  equivalent GUI-session setup) exists. The app always has this; CLI tools that want AX
+  access must init it themselves.
 
 ## Calling it
 
@@ -43,6 +80,12 @@ let asr = try AlexTranscriber(modelDirectory: modelDir)
 let text = try asr.transcribe(audioURL: audioURL)        // from a file
 let text = try asr.transcribe(audioData: data)           // from encoded bytes in memory
 let text = try asr.transcribe(samples: pcm, sampleRate: 16000)  // from raw PCM in memory
+
+// Streaming variant: partial text callbacks while decoding, plus cooperative cancel.
+let text = try asr.transcribe(
+    samples: pcm, sampleRate: 16000,
+    onPartialText: { partial in updateUI(with: partial) },
+    isCancelled: { shouldAbort })
 ```
 
 The in-memory overloads (`audioData:` / `samples:`) avoid writing audio to disk before
@@ -86,6 +129,41 @@ cd ..
 
 The model is expected under `models/Qwen3-ASR-1.7B-8bit/` (download from the HF repo of
 the same name). Set `ASR_DEBUG=1` to print raw generated token ids.
+
+### Test harness (`transcribe-test`)
+
+`swift build --product transcribe-test` builds a CLI harness that exercises the
+streaming + insertion paths without touching the app UI:
+
+```sh
+T=$(cd AlexTranscribeKit && swift build --show-bin-path)/transcribe-test
+
+"$T" feed  audio.mp3 out.pcm        # decode → raw Float32-LE 16 kHz PCM
+"$T" stream audio.mp3 [tickSec]     # replay streaming ticks over the file (partials printed)
+"$T" focus                          # print the focused element (needs AX trust)
+"$T" insert "text"                  # one-shot LiveTextInserter write at the caret
+"$T" live "A" "AB" "ABC"            # cumulative updates 0.5 s apart (revisions in place)
+"$T" hotkey                         # post the keyCode-176 toggle the app listens for
+```
+
+`TRANSCRIBE_MODEL_DIR` overrides the model location (default `./models/Qwen3-ASR-1.7B-8bit`).
+
+The AX modes need Accessibility permission for whichever process runs them. When wrapped
+in an `.app` bundle and launched via `open`, a GUI-session AX connection exists and the
+writes land in the focused app.
+
+### App end-to-end test seam
+
+`TRANSCRIBE_TEST_PCM=<path-to-Float32-LE-16kHz-PCM>` makes the app feed that file at
+real-time pace instead of the microphone (`recorder.start(testFeed:…)`), so the entire
+hotkey → streaming → AX-insertion → clipboard path can be tested on machines with no
+audio device:
+
+```sh
+launchctl setenv TRANSCRIBE_TEST_PCM /tmp/voice16k.pcm
+open -n -W --stdout /tmp/app.log .xcdd/Build/Products/Debug/Transcribe.app
+# press the dictation hotkey (or `"$T" hotkey` from a trusted process) to start/stop
+```
 
 ## Notes
 

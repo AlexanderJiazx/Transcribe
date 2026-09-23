@@ -30,10 +30,23 @@ private enum SLS {
     typealias AddWindowsAndRemoveFromSpaces = @convention(c) (Int32, Int32, CFArray, Int32) -> Int32
 
     static let handle = dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/Versions/A/SkyLight", RTLD_NOW)
-    static func sym<T>(_ name: String, _ type: T.Type) -> T {
-        unsafeBitCast(dlsym(handle, name), to: type)
+    static func sym<T>(_ name: String, _ type: T.Type) -> T? {
+        guard let p = dlsym(handle, name) else { return nil }
+        return unsafeBitCast(p, to: type)
     }
 
+    // Private SPIs can vanish in a new macOS release — resolve each once and
+    // degrade to normal window behavior instead of crashing at launch.
+    static let available: Bool = {
+        guard handle != nil,
+              sym("SLSMainConnectionID", MainConnectionID.self) != nil,
+              sym("SLSSpaceCreate", SpaceCreate.self) != nil,
+              sym("SLSSpaceSetAbsoluteLevel", SpaceSetAbsoluteLevel.self) != nil,
+              sym("SLSShowSpaces", ShowSpaces.self) != nil,
+              sym("SLSSpaceAddWindowsAndRemoveFromSpaces", AddWindowsAndRemoveFromSpaces.self) != nil
+        else { return false }
+        return true
+    }()
     static let mainConnectionID = sym("SLSMainConnectionID", MainConnectionID.self)
     static let spaceCreate = sym("SLSSpaceCreate", SpaceCreate.self)
     static let spaceSetAbsoluteLevel = sym("SLSSpaceSetAbsoluteLevel", SpaceSetAbsoluteLevel.self)
@@ -53,21 +66,35 @@ final class FixedOverlaySpace {
     // off the lock screen; raise to 400 to show it even when the screen is locked.
     private static let level: Int32 = 300
 
-    private let connection: Int32
-    private let space: Int32
+    private var connection: Int32 = 0
+    private var space: Int32 = 0
+    private let ready: Bool
 
     private init() {
-        connection = SLS.mainConnectionID()
-        space = SLS.spaceCreate(connection, 1, 0)
-        _ = SLS.spaceSetAbsoluteLevel(connection, space, Self.level)
-        _ = SLS.showSpaces(connection, [space] as CFArray)
+        guard SLS.available,
+              let conn = SLS.mainConnectionID,
+              let create = SLS.spaceCreate,
+              let setLevel = SLS.spaceSetAbsoluteLevel,
+              let show = SLS.showSpaces else {
+            print("[skylight] private symbols unavailable — overlay space disabled")
+            ready = false
+            return
+        }
+        let c = conn()
+        connection = c
+        let s = create(c, 1, 0)
+        space = s
+        _ = setLevel(c, s, Self.level)
+        _ = show(c, [s] as CFArray)
+        ready = true
     }
 
     /// Moves `window` into the fixed overlay space. Must be called after the
     /// window is on screen (windowNumber > 0). The trailing `7` is the
     /// all-Spaces selector: remove the window from the user Spaces it was in.
     func adopt(_ window: NSWindow) {
-        guard window.windowNumber > 0 else { return }
-        _ = SLS.addWindowsAndRemoveFromSpaces(connection, space, [window.windowNumber] as CFArray, 7)
+        guard ready, window.windowNumber > 0,
+              let add = SLS.addWindowsAndRemoveFromSpaces else { return }
+        _ = add(connection, space, [window.windowNumber] as CFArray, 7)
     }
 }
