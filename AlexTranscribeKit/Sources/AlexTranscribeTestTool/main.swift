@@ -10,9 +10,9 @@ import AlexTranscribeKit
 ///                              (the format TRANSCRIBE_TEST_PCM feeds into the app).
 ///   stream <audio> [tickSec]   Simulate the app's tick loop: re-transcribe the file at
 ///                              growing prefixes, print every partial + each tick's result.
-///   insert <text>              One-shot AX insert into the focused element.
-///   live <t1> <t2> ...         Drive LiveTextInserter with cumulative updates (0.5s apart)
-///                              — pass revised texts to exercise range-replace.
+///   insert <text>              One-shot append into the focused field.
+///   live <t1> <t2> ...         Drive ChunkInserter with cumulative texts (0.5s apart)
+///                              — growing prefix-stable texts exercise the delta path.
 ///   focus                      Print the focused element's role and current value.
 ///   hotkey                     Post the dictation hotkey (keyCode 176) down+up.
 
@@ -98,18 +98,18 @@ case "stream":
 case "insert":
     guard args.count == 2 else { usage() }
     requestAXTrust()
-    let ins = LiveTextInserter()
+    let ins = ChunkInserter()
     ins.begin()
-    ins.update(args[1])
+    ins.appendDelta(args[1])
     print("finish mode: \(ins.finish(args[1]))")
 
 case "live":
     guard args.count >= 2 else { usage() }
     requestAXTrust()
-    let ins = LiveTextInserter()
+    let ins = ChunkInserter()
     ins.begin()
     for (i, text) in args.dropFirst().enumerated() {
-        ins.update(text)
+        ins.appendDelta(text)
         print("[update \(i)] wrote: \(text)")
         Thread.sleep(forTimeInterval: 0.5)
     }

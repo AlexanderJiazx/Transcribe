@@ -46,17 +46,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var transcriber: AlexTranscriber?
     
     private let transcribeQueue = DispatchQueue(label: "transcribe", qos: .userInitiated)  // ← add
-    // AX work lives off the main runloop: a hung target app can stall an AX call
-    // for seconds, and a stall that long on main lets macOS time out and disable
-    // the event tap — a hotkey press inside that window is silently lost. All
-    // inserter calls funnel through this one serial queue so ordering holds.
+    // Pasteboard/insertion work lives off the main runloop: it blocks briefly per
+    // chunk while the pasteboard is swapped and restored, and a stall that long on
+    // main lets macOS time out and disable the event tap — a hotkey press inside
+    // that window is silently lost. All inserter calls funnel through this one
+    // serial queue so chunk ordering holds.
     private let insertQueue = DispatchQueue(label: "insert", qos: .userInitiated)
 
     // Live-transcription state. While recording, a loop on transcribeQueue repeatedly
-    // re-transcribes the growing capture; each pass' partials land in the focused text
-    // field via the Accessibility API (LiveTextInserter), so the user sees words appear
-    // during recording, not after it.
-    private let inserter = LiveTextInserter()
+    // re-transcribes the growing capture; each pass' COMMITTED words land in the
+    // focused text field via append-only paste chunks (ChunkInserter), so the user
+    // sees stable words appear during recording, not after it. The revisable tail
+    // is never written to the field — it decodes once at stop.
+    private let inserter = ChunkInserter()
     private var sessionSamples: [Float] = []
     private var sessionSampleRate: Double = 16000
     private let streamLock = NSLock()
@@ -91,6 +93,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private var committedText: String {
         shownWords.prefix(committedCount).joined(separator: " ")
+    }
+
+    /// Strip spurious sentence-terminal punctuation from committed words.
+    /// Windowed decodes bias toward utterance-final punctuation ("." "!" "?")
+    /// on repeated or choppy speech — "If you. see this message." — and under
+    /// append-only insertion a frozen artifact can never be repaired. A mark is
+    /// ungrammatical when the next COMMITTED word continues lowercase, so it is
+    /// dropped; marks before capitals or at the utterance end are kept. The
+    /// last committed word is never touched (its continuation isn't decided
+    /// yet), which keeps emitted text a verbatim prefix of the final text.
+    private func sanitizeCommittedPunctuation() {
+        let n = committedCount
+        guard n >= 2 else { return }
+        for i in 0..<(n - 1) {
+            let w = shownWords[i]
+            guard let last = w.last, ".!?".contains(last),
+                  let first = shownWords[i + 1].first,
+                  first.isLetter, first.isLowercase else { continue }
+            shownWords[i] = String(w.dropLast())
+        }
     }
 
     // Particle overlay shown inside the window during record + transcribe.
@@ -463,10 +485,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // s+tailFrom+i; prevTailNorm[j] sat at prevBoundary+j → j = i + (s+tailFrom-prevBoundary).
         // Commit votes only count on a real anchor — after a resync the previous
         // tail alignment is meaningless, so nothing new gets committed that tick.
+        // The last ~4 hypothesis words are NEVER commit candidates: the decoder
+        // biases words near the decode's end toward utterance-final punctuation
+        // ("If you. see this."), and committed text is pasted into the field —
+        // an artifact frozen there can never be repaired under append-only.
         var extra = 0
         if !resynced, prevBoundary >= 0 {
             let d = s + tailFrom - prevBoundary
-            while tailFrom + extra < words.count - 2 {
+            while tailFrom + extra < words.count - 4 {
                 let j = extra + d
                 guard j >= 0, j < prevTailNorm.count, prevTailNorm[j] == wn[tailFrom + extra] else { break }
                 extra += 1
@@ -474,16 +500,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         shownWords = Array(shownWords.prefix(s + tailFrom)) + Array(words.dropFirst(tailFrom))
-        committedCount = min(shownWords.count, max(committedCount, s + tailFrom + extra))
+        // Uniform commit depth: no hypothesis word within 4 of the decode's end
+        // becomes committed, however it reached the boundary.
+        committedCount = min(shownWords.count,
+                             max(committedCount, s + min(tailFrom + extra, words.count - 4)))
         committedEndSample = max(committedEndSample,
-            windowStart + Int(Double(spanCount) * Double(tailFrom + extra) / Double(words.count)))
+            windowStart + Int(Double(spanCount) * Double(min(tailFrom + extra, words.count - 4)) / Double(words.count)))
         prevBoundary = s + tailFrom
         prevTailNorm = Array(wn.dropFirst(tailFrom))
         print("[stream] \(committedCount)w committed / \(shownWords.count) shown (match \(k)@\(s), +\(extra))")
 
-        let committed = shownWords.prefix(committedCount).joined(separator: " ")
-        emitPartial(shownWords.joined(separator: " "),
-                    keepPrefix: committed.utf16.count, session: session)
+        // Only committed words go to the field — append-only chunks, never a
+        // rewrite. The revisable tail stays off-screen until the final pass.
+        sanitizeCommittedPunctuation()
+        // Hold back the newest committed word: its sanitize verdict (whether a
+        // trailing '.', '!', '?' is real or a hyp-end artifact) is still pending
+        // on the next word. Every pasted word must have a FINAL verdict — once
+        // pasted it can never be rewritten, and a late punctuation strip would
+        // diverge the emitted prefix from the pasted one, making the append
+        // delta re-paste the whole tail (the "and the and the" duplication).
+        emitCommitted(shownWords.prefix(max(0, committedCount - 1)).joined(separator: " "), session: session)
     }
 
     /// Final-pass reconciliation: the window re-decode covers the tail plus recent
@@ -508,20 +544,45 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let wn = words.map(normalizeWord)
         // Anchor anywhere in shown text, but never earlier than the span the
         // window's audio could have produced (≈ one shown word per decode word).
-        // Anchoring inside the committed region is allowed — the window decode is
-        // fresher than the tick that committed those words.
-        let floor = max(0, shownWords.count - words.count - 6)
+        // The floor is clamped to committedCount: committed words are already
+        // pasted into the field, so the final text MUST carry them verbatim —
+        // rewriting them would duplicate text the user can already see.
+        let floor = max(committedCount, shownWords.count - words.count - 6)
         let anchor = spliceAnchor(wn, hypCount: words.count, floor: floor)
         if anchor >= 0 {
             shownWords = Array(shownWords.prefix(anchor)) + words
         } else {
-            // No anchor — same fallback as streaming resyncs: keep committed
-            // verbatim, append the decode minus any duplicated overlap.
-            let matched = committedSuffixOverlap(wn, hypCount: words.count)
+            // No anchor — keep committed verbatim and append the decode tail
+            // identified by coverage (how much of the decode re-says committed).
+            let matched = decodeCoverage(wn)
             shownWords = Array(shownWords.prefix(committedCount)) + words.dropFirst(matched)
         }
         committedCount = shownWords.count
+        // Sanitize the committed prefix identically to streaming emits so the
+        // field text stays a verbatim prefix of the final text.
+        sanitizeCommittedPunctuation()
         return shownWords.joined(separator: " ")
+    }
+
+    /// How much of a decode's leading words are consumed by re-saying the
+    /// committed prefix: committed words are matched as an in-order subsequence
+    /// of the decode (normalized), tolerating the decode inserting words the
+    /// ticks never produced. Returns the decode index after the last consumed
+    /// committed word — `words.dropFirst(result)` is the safe tail to append
+    /// without duplicating what's already committed. 0 on total mismatch.
+    private func decodeCoverage(_ wn: [String]) -> Int {
+        guard committedCount > 0, !wn.isEmpty else { return 0 }
+        let cn = shownWords.prefix(committedCount).map(normalizeWord)
+        var ci = 0          // next committed word to place
+        var cov = 0         // decode index past the last placed committed word
+        for j in 0..<wn.count {
+            if cn[ci] == wn[j] {
+                ci += 1
+                cov = j + 1
+                if ci == cn.count { break }
+            }
+        }
+        return cov
     }
 
     /// Fuzzy anchor of the hypothesis prefix onto shown words at positions ≥ floor:
@@ -558,8 +619,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return anchor
     }
 
-    /// How many leading hypothesis words re-say the committed suffix — used to
-    /// skip a duplicated overlap when no tail anchor exists (resync fallback).
+    /// How many leading hypothesis words re-say the committed suffix — used by
+    /// the streaming resync fallback to skip a duplicated overlap.
     /// Subsequence match over a slightly wider shown span tolerates one side
     /// inserting a word relative to the other.
     private func committedSuffixOverlap(_ wn: [String], hypCount: Int) -> Int {
@@ -622,26 +683,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         String(w.lowercased().unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) })
     }
 
-    private func utf16CommonPrefix(_ a: String, _ b: String) -> Int {
-        var i = a.utf16.startIndex, j = b.utf16.startIndex, n = 0
-        while i != a.utf16.endIndex, j != b.utf16.endIndex, a.utf16[i] == b.utf16[j] {
-            i = a.utf16.index(after: i); j = b.utf16.index(after: j); n += 1
-        }
-        return n
-    }
-
-    /// Route a cleaned partial transcript into the focused field via the AX inserter.
-    /// `keepPrefix` chars at the start are committed and left untouched.
-    /// Serial-queue dispatch keeps emissions in order; the session check drops
-    /// stragglers from an already-finished session. Runs on insertQueue: AX calls
-    /// into a hung target must not stall the main runloop (the event tap dies and
+    /// Route newly-committed text into the focused field as an append-only paste
+    /// chunk. `committed` is the whole committed transcript (prefix-stable — it
+    /// only ever grows); the inserter appends just the new suffix.
+    /// Serial-queue dispatch keeps chunks in order; the session check drops
+    /// stragglers from an already-finished session. Runs on insertQueue: a stalled
+    /// pasteboard write must not stall the main runloop (the event tap dies and
     /// eats hotkey presses).
-    private func emitPartial(_ text: String, keepPrefix: Int = 0, session: Int) {
+    private func emitCommitted(_ committed: String, session: Int) {
         insertQueue.async { [weak self] in
             // A tick that was mid-decode when recording stopped (or a stale emission
-            // from a superseded session) must not overwrite the final `finish()` write.
+            // from a superseded session) must not append after `finish()` ran.
             guard let self, self.isStreamingActive(for: session) else { return }
-            self.inserter.update(text, keepPrefix: keepPrefix)
+            self.inserter.appendDelta(committed)
         }
     }
 
@@ -713,10 +767,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         print("[transcribe] tail decode empty over \(Double(tailCount)/rate)s — full decode")
                         let rawText = try self.transcriber!.transcribe(
                             samples: samples, sampleRate: rate, verbose: false)
-                        text = textPostProcessing(for: rawText)
+                        text = self.applyFullDecode(rawText)
                     } else {
-                        let joined = self.applyFinalWindow(hypothesis: hyp)
-                        text = textPostProcessing(for: joined)
+                        text = self.applyFinalWindow(hypothesis: hyp)
                     }
                 } else {
                     // Full decode: the stream never committed (short recording / no
@@ -727,34 +780,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     }
                     let rawText = try self.transcriber!.transcribe(
                         samples: samples, sampleRate: rate, verbose: false)
-                    text = textPostProcessing(for: rawText)
+                    text = self.applyFullDecode(rawText)
                 }
                 self.insertQueue.async {
-                    // Rewrite everything from the first divergence between what's in
-                    // the field and the final decode — committed text that disagrees
-                    // with the final transcript must not stay frozen in the document.
-                    // `currentText` (not the streaming state) is ground truth here:
-                    // a partial dropped at stop can leave shownText a tick ahead.
-                    let keep = self.utf16CommonPrefix(self.inserter.currentText, text)
-                    // Final write through AX (replaces only the divergent tail), then clipboard.
-                    // Clipboard is set before the fallback so a needed ⌘V pastes text.
-                    let mode = self.inserter.finish(text, keepPrefix: keep)
+                    // Append the tail the field hasn't seen yet — the committed
+                    // prefix is already pasted and carried verbatim in `text`,
+                    // so this is a single append-only write, never a rewrite.
+                    let mode = self.inserter.finish(text)
+                    print("[finish] text=\(text)")
                     DispatchQueue.main.async {
                         // An empty transcript (silence/accidental tap) must not clobber
-                        // the user's clipboard, and a ⌘V fallback would paste stale text.
+                        // the user's clipboard.
                         if !text.isEmpty {
                             let pb = NSPasteboard.general
                             pb.clearContents()
                             pb.setString(text, forType: .string)
                         }
                         print("[transcribe] copied \(text.count) chars to clipboard; delivery=\(mode)")
-
-                        if mode == .pasteFallback, !text.isEmpty {
-                            // The focused field refused AX writes — fall back to ⌘V paste of
-                            // the clipboard we just set (the old delivery mechanism).
-                            LiveTextInserter.pasteClipboard()
-                        }
-
                         self.finishTranscription()      // stop particles + slide window up
                     }
                 }
@@ -765,12 +807,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    private func textPostProcessing(for text:String) -> String{
-        if text.hasSuffix(".") || text.hasSuffix("。"){
-            return String(text.dropLast())
-        }else{
-            return text
+    /// Fold a whole-utterance decode into shownWords while keeping committed
+    /// text verbatim — those words are already pasted into the field, so the
+    /// final text MUST still carry them as its prefix (a revised committed word
+    /// would otherwise be appended as a duplicate).
+    private func applyFullDecode(_ hyp: String) -> String {
+        let words = hyp.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !words.isEmpty else {
+            // Nothing decoded: keep whatever was committed rather than inventing text.
+            return shownWords.prefix(committedCount).joined(separator: " ")
         }
+        let wn = words.map(normalizeWord)
+        let anchor = spliceAnchor(wn, hypCount: words.count, floor: committedCount)
+        if anchor >= 0 {
+            shownWords = Array(shownWords.prefix(anchor)) + words
+        } else {
+            let cov = decodeCoverage(wn)
+            shownWords = Array(shownWords.prefix(committedCount)) + words.dropFirst(cov)
+        }
+        committedCount = shownWords.count
+        sanitizeCommittedPunctuation()
+        return shownWords.joined(separator: " ")
     }
     
     private func switchWindowState(){
