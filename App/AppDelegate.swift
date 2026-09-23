@@ -802,6 +802,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             } catch {
                 print("[transcribe] error: \(error.localizedDescription)")
+                self.insertQueue.async { self.inserter.abort() }
                 DispatchQueue.main.async { self.finishTranscription() }
             }
         }

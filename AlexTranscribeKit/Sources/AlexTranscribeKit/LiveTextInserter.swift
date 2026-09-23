@@ -17,7 +17,18 @@ import Foundation
 ///
 /// Delivery is plain-text ⌘V paste — it works in every editable field (native,
 /// web, Electron, Terminal) and needs no accessibility trust of the TARGET app.
-/// The user's clipboard contents are snapshotted and restored around each paste.
+///
+/// Clipboard policy: the user's pasteboard is snapshotted ONCE at begin() and
+/// chunks are left on the pasteboard between writes — we do NOT restore around
+/// each paste. A posted ⌘V is read asynchronously on the target's runloop: if
+/// the target is stalled past our settle window, restoring would make every
+/// queued ⌘V splice the USER's private clipboard contents into their document
+/// (reproduced: SIGSTOP the target mid-dictation -> three copies of the old
+/// clipboard injected mid-transcript). Leaving our own chunk on the pasteboard
+/// means a late paste can only ever duplicate transcript text — bounded, and
+/// never user data. The snapshot is restored only when no transcript was
+/// produced (empty) or the session aborted; a real transcript's final write
+/// puts the transcript itself on the clipboard, superseding the snapshot.
 ///
 /// Callers pass CUMULATIVE text that is prefix-stable: each call's text must
 /// extend what the previous call provided (committed words only ever grow; the
@@ -49,6 +60,11 @@ public final class ChunkInserter {
     /// ends with, not the transcript marker.
     private var lastPastedChar: Character?
 
+    /// The user's pasteboard items captured at begin(), restored only when the
+    /// session produced no transcript or was aborted (a real transcript
+    /// legitimately ends up on the clipboard itself).
+    private var savedItems: [NSPasteboardItem] = []
+
     /// One optional, bounded probe of the focused field's caret on the FIRST
     /// append of a session — decides whether a separating space is needed
     /// against adjacent existing text. Failure (no AX trust, non-AX field)
@@ -60,13 +76,24 @@ public final class ChunkInserter {
 
     public init() {}
 
-    /// Reset per-session state. Call when a new dictation starts.
+    /// Reset per-session state and snapshot the user's pasteboard. Call when a
+    /// new dictation starts.
     public func begin() {
         insertedText = ""
         lastPastedChar = nil
         probedCaret = false
         probeHadTextBeforeCaret = false
         probeHadTextAfterCaret = false
+        savedItems = Self.snapshotPasteboard()
+    }
+
+    /// Session ended without a transcript worth delivering (empty decode,
+    /// recorder error): put the user's pre-dictation clipboard back — the
+    /// pasteboard currently holds our last chunk.
+    public func abort() {
+        restore()
+        insertedText = ""
+        lastPastedChar = nil
     }
 
     /// Append whatever part of `text` hasn't been written yet. `text` is the
@@ -104,7 +131,12 @@ public final class ChunkInserter {
         insertedText = text
     }
 
-    /// Final write for the session: appends the remainder of `text`.
+    /// Final write for the session: appends the remainder of `text`. When
+    /// nothing was ever emitted, the pasteboard still holds... nothing of ours
+    /// (no chunk was ever written) — nothing to restore. When chunks did land,
+    /// the caller's transcript write supersedes; there is no restore here —
+    /// restoring between the last ⌘V and the transcript write would open the
+    /// same stale-⌘V splice on user data that per-chunk restore caused.
     @discardableResult
     public func finish(_ text: String) -> DeliveryMode {
         appendDelta(text)
@@ -129,26 +161,39 @@ public final class ChunkInserter {
         !a.isWhitespace && !b.isWhitespace
     }
 
-    /// Paste `s` as plain text while preserving the user's clipboard: snapshot
-    /// every item/type first, write our string, post ⌘V, give the target's
-    /// runloop time to read the pasteboard, then restore.
+    /// Paste `s` as plain text. The user's clipboard was already snapshotted at
+    /// begin(); we LEAVE our chunk on the pasteboard so a ⌘V read late by a
+    /// stalled target app can only splice transcript text into the field —
+    /// restoring the user's data between chunks is what turned that same stall
+    /// into user-private contents landing in the document. Snapshot restore
+    /// happens in abort()/finish(), not here.
     private func paste(_ s: String) {
         let pb = NSPasteboard.general
-        let saved: [NSPasteboardItem] = pb.pasteboardItems?.map { item in
+        pb.clearContents()
+        pb.setString(s, forType: .string)
+        Self.pasteClipboard()
+        // The target reads the pasteboard asynchronously on its own runloop;
+        // wait long enough that a healthy target has consumed it before the
+        // next chunk overwrites the pasteboard. (No API exposes the read —
+        // this is a settle, and a miss is now benign.)
+        usleep(90_000)
+    }
+
+    private static func snapshotPasteboard() -> [NSPasteboardItem] {
+        NSPasteboard.general.pasteboardItems?.map { item in
             let copy = NSPasteboardItem()
             for t in item.types {
                 if let data = item.data(forType: t) { copy.setData(data, forType: t) }
             }
             return copy
         } ?? []
+    }
+
+    private func restore() {
+        guard !savedItems.isEmpty else { return }
+        let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(s, forType: .string)
-        Self.pasteClipboard()
-        // The target reads the pasteboard asynchronously on its own runloop —
-        // restoring immediately would race it and re-paste the OLD clipboard.
-        usleep(90_000)
-        pb.clearContents()
-        if !saved.isEmpty { pb.writeObjects(saved) }
+        pb.writeObjects(savedItems)
     }
 
     /// Read the focused element's caret surroundings — ONE bounded AX exchange,
